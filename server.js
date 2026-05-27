@@ -460,8 +460,28 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET") {
+    const url = req.url || "/";
+
+    // OAuth protected resource metadata — tells Claude this server needs no auth
+    if (url === "/.well-known/oauth-protected-resource" || url === "/.well-known/oauth-protected-resource/") {
+      res.writeHead(200);
+      res.end(JSON.stringify({
+        resource: "https://shw-mcp-production.up.railway.app",
+        authorization_servers: [],
+        bearer_methods_supported: [],
+        scopes_supported: []
+      }));
+      return;
+    }
+
+    // MCP discovery / health check
     res.writeHead(200);
-    res.end(JSON.stringify({ name: "shw-commerce7", version: "1.0.0", description: "Spruce Hill Winery Commerce7 MCP", authentication: { type: "none" } }));
+    res.end(JSON.stringify({
+      name: "shw-commerce7",
+      version: "1.0.0",
+      description: "Spruce Hill Winery Commerce7 MCP",
+      authentication: { type: "none" }
+    }));
     return;
   }
 
