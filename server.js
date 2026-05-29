@@ -455,6 +455,9 @@ const server = http.createServer(async (req, res) => {
   // CORS headers on every response
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 
+  // Log every request for debugging
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
+
   if (req.method === "OPTIONS") {
     res.writeHead(200); res.end("{}"); return;
   }
@@ -464,13 +467,40 @@ const server = http.createServer(async (req, res) => {
 
     // OAuth protected resource metadata — tells Claude this server needs no auth
     if (url === "/.well-known/oauth-protected-resource" || url === "/.well-known/oauth-protected-resource/") {
-      res.writeHead(200);
+      res.writeHead(200, {"Content-Type":"application/json",...CORS});
       res.end(JSON.stringify({
         resource: "https://shw-mcp-production.up.railway.app",
-        authorization_servers: [],
-        bearer_methods_supported: [],
-        scopes_supported: []
+        authorization_servers: ["https://shw-mcp-production.up.railway.app"],
+        bearer_methods_supported: ["header"],
+        scopes_supported: ["mcp"]
       }));
+      return;
+    }
+
+    // OAuth authorization server metadata
+    if (url === "/.well-known/oauth-authorization-server" || url === "/.well-known/openid-configuration") {
+      res.writeHead(200, {"Content-Type":"application/json",...CORS});
+      res.end(JSON.stringify({
+        issuer: "https://shw-mcp-production.up.railway.app",
+        authorization_endpoint: "https://shw-mcp-production.up.railway.app/authorize",
+        token_endpoint: "https://shw-mcp-production.up.railway.app/token",
+        response_types_supported: ["code"],
+        grant_types_supported: ["authorization_code"],
+        token_endpoint_auth_methods_supported: ["none"],
+        code_challenge_methods_supported: ["S256"]
+      }));
+      return;
+    }
+
+    // OAuth authorization endpoint (GET) — redirect with code immediately
+    if (url.startsWith("/authorize")) {
+      const params = new URL("https://x.com" + url).searchParams;
+      const redirectUri = params.get("redirect_uri") || "";
+      const state = params.get("state") || "";
+      const code = "shw-auth-code-" + Date.now();
+      const redirect = `${redirectUri}${redirectUri.includes("?")?"&":"?"}code=${code}&state=${state}`;
+      res.writeHead(302, { Location: redirect, ...CORS });
+      res.end();
       return;
     }
 
@@ -487,6 +517,36 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method !== "POST") {
     res.writeHead(405); res.end(JSON.stringify({ error: "Method not allowed" })); return;
+  }
+
+  // ── OAuth stub endpoints ─────────────────────────────────────────────────
+  // These allow Claude to complete an OAuth handshake for a private/internal tool.
+  // No real auth is performed — this server is private to Spruce Hill Winery.
+  if (req.url === "/authorize") {
+    // Read body to get redirect_uri and state
+    let body2 = "";
+    req.on("data", c => body2 += c);
+    req.on("end", () => {
+      const params = new URLSearchParams(body2);
+      const redirectUri = params.get("redirect_uri") || "";
+      const state = params.get("state") || "";
+      const code = "shw-auth-code-" + Date.now();
+      const redirect = `${redirectUri}${redirectUri.includes("?")?"&":"?"}code=${code}&state=${state}`;
+      res.writeHead(302, { Location: redirect });
+      res.end();
+    });
+    return;
+  }
+
+  if (req.url === "/token") {
+    res.writeHead(200, { "Content-Type": "application/json", ...CORS });
+    res.end(JSON.stringify({
+      access_token: "shw-static-token",
+      token_type: "bearer",
+      expires_in: 86400,
+      scope: "mcp"
+    }));
+    return;
   }
 
   // Read body
