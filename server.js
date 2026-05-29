@@ -1,6 +1,6 @@
 import http from 'http';
 
-// ── Credentials ───────────────────────────────────────────────────────────────
+// x── Credentials ───────────────────────────────────────────────────────────────
 const TENANT     = process.env.C7_TENANT     || "spruce-hill-winery";
 const APP_ID     = process.env.C7_APP_ID     || "shw-claude-integration";
 const APP_SECRET = process.env.C7_APP_SECRET || "";
