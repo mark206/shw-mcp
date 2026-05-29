@@ -295,9 +295,9 @@ async function executeTool(name, args = {}) {
   // ── get_sales ──────────────────────────────────────────────────────────────
   if (name === "get_sales") {
     const { from_date, to_date, channel = "all", wine_only = true } = args;
-    let params = `&orderPaidDate=gt:${from_date}&orderPaidDate=lt:${to_date}&paymentStatus=Paid`;
+    let params = `&orderCreatedDate=gt:${from_date}&orderCreatedDate=lt:${to_date}&paymentStatus=Paid`;
     if (channel !== "all") params += `&channel=${channel}`;
-    const orders = await paginate("/order?paymentStatus=Paid", "orders", `&orderPaidDate=gt:${from_date}&orderPaidDate=lt:${to_date}${channel !== "all" ? `&channel=${channel}` : ""}`);
+    const orders = await paginate("/order?paymentStatus=Paid", "orders", `&orderCreatedDate=gt:${from_date}&orderCreatedDate=lt:${to_date}${channel !== "all" ? `&channel=${channel}` : ""}`);
     const wineRe = /^20\d\d_/;
     const byProduct = {};
     let totalRevenue = 0, totalBottles = 0, orderIds = new Set();
@@ -326,8 +326,8 @@ async function executeTool(name, args = {}) {
   if (name === "get_orders") {
     const { from_date, to_date, channel = "all", customer_name, limit = 20 } = args;
     let path = "/order?paymentStatus=Paid";
-    if (from_date) path += `&orderPaidDate=gt:${from_date}`;
-    if (to_date)   path += `&orderPaidDate=lt:${to_date}`;
+    if (from_date) path += `&orderCreatedDate=gt:${from_date}`;
+    if (to_date)   path += `&orderCreatedDate=lt:${to_date}`;
     if (channel !== "all") path += `&channel=${channel}`;
     const d = await c7Get(`${path}&limit=${Math.min(limit, 50)}`);
     let orders = d.orders || [];
@@ -344,7 +344,7 @@ async function executeTool(name, args = {}) {
       returned: orders.length,
       orders: orders.map(o => ({
         order_number:  o.orderNumber,
-        date:          o.orderPaidDate,
+        date:          o.orderCreatedDate,
         channel:       o.channel,
         customer:      `${o.shipTo?.firstName || ""} ${o.shipTo?.lastName || ""}`.trim(),
         total:         dollars(o.total),
@@ -455,9 +455,6 @@ const server = http.createServer(async (req, res) => {
   // CORS headers on every response
   Object.entries(CORS).forEach(([k, v]) => res.setHeader(k, v));
 
-  // Log every request for debugging
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} from ${req.headers['x-forwarded-for'] || req.socket.remoteAddress}`);
-
   if (req.method === "OPTIONS") {
     res.writeHead(200); res.end("{}"); return;
   }
@@ -467,40 +464,13 @@ const server = http.createServer(async (req, res) => {
 
     // OAuth protected resource metadata — tells Claude this server needs no auth
     if (url === "/.well-known/oauth-protected-resource" || url === "/.well-known/oauth-protected-resource/") {
-      res.writeHead(200, {"Content-Type":"application/json",...CORS});
+      res.writeHead(200);
       res.end(JSON.stringify({
         resource: "https://shw-mcp-production.up.railway.app",
-        authorization_servers: ["https://shw-mcp-production.up.railway.app"],
-        bearer_methods_supported: ["header"],
-        scopes_supported: ["mcp"]
+        authorization_servers: [],
+        bearer_methods_supported: [],
+        scopes_supported: []
       }));
-      return;
-    }
-
-    // OAuth authorization server metadata
-    if (url === "/.well-known/oauth-authorization-server" || url === "/.well-known/openid-configuration") {
-      res.writeHead(200, {"Content-Type":"application/json",...CORS});
-      res.end(JSON.stringify({
-        issuer: "https://shw-mcp-production.up.railway.app",
-        authorization_endpoint: "https://shw-mcp-production.up.railway.app/authorize",
-        token_endpoint: "https://shw-mcp-production.up.railway.app/token",
-        response_types_supported: ["code"],
-        grant_types_supported: ["authorization_code"],
-        token_endpoint_auth_methods_supported: ["none"],
-        code_challenge_methods_supported: ["S256"]
-      }));
-      return;
-    }
-
-    // OAuth authorization endpoint (GET) — redirect with code immediately
-    if (url.startsWith("/authorize")) {
-      const params = new URL("https://x.com" + url).searchParams;
-      const redirectUri = params.get("redirect_uri") || "";
-      const state = params.get("state") || "";
-      const code = "shw-auth-code-" + Date.now();
-      const redirect = `${redirectUri}${redirectUri.includes("?")?"&":"?"}code=${code}&state=${state}`;
-      res.writeHead(302, { Location: redirect, ...CORS });
-      res.end();
       return;
     }
 
@@ -517,36 +487,6 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method !== "POST") {
     res.writeHead(405); res.end(JSON.stringify({ error: "Method not allowed" })); return;
-  }
-
-  // ── OAuth stub endpoints ─────────────────────────────────────────────────
-  // These allow Claude to complete an OAuth handshake for a private/internal tool.
-  // No real auth is performed — this server is private to Spruce Hill Winery.
-  if (req.url === "/authorize") {
-    // Read body to get redirect_uri and state
-    let body2 = "";
-    req.on("data", c => body2 += c);
-    req.on("end", () => {
-      const params = new URLSearchParams(body2);
-      const redirectUri = params.get("redirect_uri") || "";
-      const state = params.get("state") || "";
-      const code = "shw-auth-code-" + Date.now();
-      const redirect = `${redirectUri}${redirectUri.includes("?")?"&":"?"}code=${code}&state=${state}`;
-      res.writeHead(302, { Location: redirect });
-      res.end();
-    });
-    return;
-  }
-
-  if (req.url === "/token") {
-    res.writeHead(200, { "Content-Type": "application/json", ...CORS });
-    res.end(JSON.stringify({
-      access_token: "shw-static-token",
-      token_type: "bearer",
-      expires_in: 86400,
-      scope: "mcp"
-    }));
-    return;
   }
 
   // Read body
