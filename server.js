@@ -1,6 +1,6 @@
 import http from 'http';
 
-// x── Credentials ───────────────────────────────────────────────────────────────
+// ── Credentials ───────────────────────────────────────────────────────────────
 const TENANT     = process.env.C7_TENANT     || "spruce-hill-winery";
 const APP_ID     = process.env.C7_APP_ID     || "shw-claude-integration";
 const APP_SECRET = process.env.C7_APP_SECRET || "";
@@ -295,14 +295,14 @@ async function executeTool(name, args = {}) {
   // ── get_sales ──────────────────────────────────────────────────────────────
   if (name === "get_sales") {
     const { from_date, to_date, channel = "all", wine_only = true } = args;
-    let basePath = `/order?paymentStatus=Paid&updatedAt=gt:${from_date}&updatedAt=lt:${to_date}`;
+    let basePath = `/order?paymentStatus=Paid`;
     if (channel !== "all") basePath += `&channel=${channel}`;
     const allOrders = await paginate(basePath, "orders");
-    // Filter client-side by orderPaidDate to ensure accuracy
+    // Filter client-side by orderPaidDate
     const orders = allOrders.filter(o => {
       if (!o.orderPaidDate) return false;
       const d = o.orderPaidDate.slice(0, 10);
-      return d >= from_date && d <= to_date;
+      return (!from_date || d >= from_date) && (!to_date || d <= to_date);
     });
     const wineRe = /^20\d\d_/;
     const byProduct = {};
@@ -332,11 +332,19 @@ async function executeTool(name, args = {}) {
   if (name === "get_orders") {
     const { from_date, to_date, channel = "all", customer_name, limit = 20 } = args;
     let path = "/order?paymentStatus=Paid";
-    if (from_date) path += `&updatedAt=gt:${from_date}`;
-    if (to_date)   path += `&updatedAt=lt:${to_date}`;
+    if (from_date) path += ``;  // date filtering done client-side below
+    if (to_date)   path += ``;
     if (channel !== "all") path += `&channel=${channel}`;
     const d = await c7Get(`${path}&limit=${Math.min(limit, 50)}`);
     let orders = d.orders || [];
+    // Filter by date client-side
+    if (from_date || to_date) {
+      orders = orders.filter(o => {
+        if (!o.orderPaidDate) return false;
+        const dt = o.orderPaidDate.slice(0, 10);
+        return (!from_date || dt >= from_date) && (!to_date || dt <= to_date);
+      });
+    }
     if (customer_name) {
       const q = customer_name.toLowerCase();
       orders = orders.filter(o => {
