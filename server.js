@@ -76,6 +76,38 @@ function fmt(b) {
 }
 function dollars(cents) { return `$${(cents / 100).toFixed(2)}`; }
 
+// ── Pacific-time date handling ───────────────────────────────────────────────
+// Commerce7 stores timestamps in UTC but its reports (Day Sales Summary, etc.)
+// bucket orders by Pacific calendar day. All date filtering here does the same.
+const TZ = "America/Los_Angeles";
+const pacDayFmt = new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" });
+function pacificDay(iso) {          // "2026-11-01T02:48:06.000Z" -> "2026-10-31"
+  if (!iso) return null;
+  return pacDayFmt.format(new Date(iso));
+}
+function shiftDay(ymd, days) {      // "2026-10-31", +1 -> "2026-11-01"
+  const d = new Date(`${ymd}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+function inPacificRange(o, from_date, to_date) {
+  const d = pacificDay(o.orderPaidDate);
+  if (!d) return false;
+  return (!from_date || d >= from_date) && (!to_date || d <= to_date);
+}
+// Ask the API for a window one day wider on each side (its date filter is UTC
+// and date-only), then trim precisely by Pacific day client-side.
+function apiDateWindow(from_date, to_date) {
+  if (!from_date && !to_date) return "";
+  const lo = from_date ? shiftDay(from_date, -1) : "2000-01-01";
+  const hi = to_date ? shiftDay(to_date, 2) : "2100-01-01";
+  return `&orderPaidDate=btw:${lo}|${hi}`;
+}
+function isWineItem(item) {
+  if (item.type) return item.type === "Wine";
+  return /^20\d\d_/.test(item.sku || "");
+}
+
 // ── Tool definitions ──────────────────────────────────────────────────────────
 const TOOLS = [
   {
@@ -120,7 +152,7 @@ const TOOLS = [
   },
   {
     name: "get_sales",
-    description: "Get wine bottle sales from Commerce7 orders. Filter by date range and channel. Returns revenue and bottles sold per wine.",
+    description: "Get sales from Commerce7 paid orders by Pacific-time calendar day (matches C7 reports). Returns net/gross revenue, discounts, tax, tips, and bottles per wine. Use wine_only=false to tie to the Day Sales Summary.",
     inputSchema: { type: "object", properties: {
       from_date:  { type: "string", description: "Start date YYYY-MM-DD" },
       to_date:    { type: "string", description: "End date YYYY-MM-DD" },
@@ -131,7 +163,7 @@ const TOOLS = [
   },
   {
     name: "get_orders",
-    description: "Get recent orders with full detail. Filter by date, channel, customer name, or order number.",
+    description: "Get orders with full detail. Date filters use Pacific-time calendar days (matches C7 reports). Filter by date, channel, or customer name.",
     inputSchema: { type: "object", properties: {
       from_date:     { type: "string", description: "Start date YYYY-MM-DD (optional)" },
       to_date:       { type: "string", description: "End date YYYY-MM-DD (optional)" },
@@ -295,76 +327,107 @@ async function executeTool(name, args = {}) {
   // ── get_sales ──────────────────────────────────────────────────────────────
   if (name === "get_sales") {
     const { from_date, to_date, channel = "all", wine_only = true } = args;
-    let basePath = `/order?paymentStatus=Paid`;
+    let basePath = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") basePath += `&channel=${channel}`;
     const allOrders = await paginate(basePath, "orders");
-    // Filter client-side by orderPaidDate
-    const orders = allOrders.filter(o => {
-      if (!o.orderPaidDate) return false;
-      const d = o.orderPaidDate.slice(0, 10);
-      return (!from_date || d >= from_date) && (!to_date || d <= to_date);
-    });
-    const wineRe = /^20\d\d_/;
+    const orders = allOrders.filter(o => inPacificRange(o, from_date, to_date));
+
     const byProduct = {};
-    let totalRevenue = 0, totalBottles = 0, orderIds = new Set();
+    let lineRevenue = 0, grossRevenue = 0, bottles = 0, units = 0, orderIds = new Set();
+    let subTotal = 0, taxTotal = 0, tipTotal = 0, shipTotal = 0, total = 0, totalAfterTip = 0;
     for (const o of orders) {
       let hasWine = false;
       for (const item of (o.items || [])) {
-        const isWine = wineRe.test(item.sku);
+        const isWine = isWineItem(item);
         if (wine_only && !isWine) continue;
-        if (!byProduct[item.sku]) byProduct[item.sku] = { title: item.productTitle, sku: item.sku, bottles: 0, revenue: 0, order_ids: new Set() };
-        byProduct[item.sku].bottles   += item.quantity;
-        byProduct[item.sku].revenue   += item.price * item.quantity;
-        byProduct[item.sku].order_ids.add(o.id);
-        totalRevenue += item.price * item.quantity;
-        totalBottles += item.quantity;
-        if (isWine) hasWine = true;
+        const qty = item.quantity || 0;
+        const line = (item.price || 0) * qty;
+        const gross = (item.originalPrice ?? item.price ?? 0) * qty;
+        if (!byProduct[item.sku]) byProduct[item.sku] = { title: item.productTitle, sku: item.sku, is_wine: isWine, units: 0, revenue: 0, gross: 0, order_ids: new Set() };
+        const r = byProduct[item.sku];
+        r.units += qty; r.revenue += line; r.gross += gross; r.order_ids.add(o.id);
+        lineRevenue += line; grossRevenue += gross; units += qty;
+        if (isWine) { bottles += qty; hasWine = true; }
       }
-      if (hasWine || !wine_only) orderIds.add(o.id);
+      if (hasWine || !wine_only) {
+        orderIds.add(o.id);
+        subTotal += o.subTotal || 0; taxTotal += o.taxTotal || 0; tipTotal += o.tipTotal || 0;
+        shipTotal += o.shipTotal || 0; total += o.total || 0; totalAfterTip += o.totalAfterTip || 0;
+      }
     }
     const wines = Object.values(byProduct)
-      .map(r => ({ title: r.title, sku: r.sku, bottles: r.bottles, cases: Math.floor(r.bottles / BPC), revenue: dollars(r.revenue), avg_price: r.bottles > 0 ? dollars(r.revenue / r.bottles) : "$0", orders: r.order_ids.size }))
-      .sort((a, b) => b.bottles - a.bottles);
-    return { period: `${from_date} to ${to_date}`, channel: channel === "all" ? "All channels" : channel, summary: { total_orders: orderIds.size, total_bottles: totalBottles, total_cases: Math.floor(totalBottles / BPC), total_revenue: dollars(totalRevenue) }, by_wine: wines };
+      .map(r => ({ title: r.title, sku: r.sku, is_wine: r.is_wine, bottles: r.is_wine ? r.units : 0, units: r.units, cases: r.is_wine ? Math.floor(r.units / BPC) : 0,
+                   revenue: dollars(r.revenue), gross: dollars(r.gross), discount: dollars(r.gross - r.revenue),
+                   avg_price: r.units > 0 ? dollars(r.revenue / r.units) : "$0", orders: r.order_ids.size }))
+      .sort((a, b) => b.units - a.units);
+    return {
+      period: `${from_date} to ${to_date} (Pacific calendar days)`,
+      channel: channel === "all" ? "All channels" : channel,
+      summary: {
+        total_orders: orderIds.size,
+        total_bottles: bottles,                       // wine bottles only
+        total_cases: Math.floor(bottles / BPC),
+        total_units: units,                           // all line items incl. tastings, pours, merch
+        net_revenue: dollars(lineRevenue),            // sum of line prices after discounts
+        gross_revenue: dollars(grossRevenue),         // at original price
+        discounts: dollars(grossRevenue - lineRevenue),
+        total_revenue: dollars(lineRevenue),          // kept for backward compatibility (= net_revenue)
+        // Order-level totals (whole orders counted; ties to C7 Day Sales Summary when wine_only=false)
+        order_subtotal: dollars(subTotal),
+        shipping: dollars(shipTotal),
+        tax: dollars(taxTotal),
+        order_total: dollars(total),
+        tips: dollars(tipTotal),
+        total_after_tip: dollars(totalAfterTip),
+      },
+      note: wine_only ? "wine_only=true: non-wine items excluded from revenue/units; order-level totals cover whole orders that contain wine" : "Order-level totals tie to the Commerce7 Day Sales Summary report",
+      by_wine: wines
+    };
   }
 
   // ── get_orders ─────────────────────────────────────────────────────────────
   if (name === "get_orders") {
     const { from_date, to_date, channel = "all", customer_name, limit = 20 } = args;
-    let path = "/order?paymentStatus=Paid";
-    if (from_date) path += ``;  // date filtering done client-side below
-    if (to_date)   path += ``;
+    let path = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") path += `&channel=${channel}`;
-    const d = await c7Get(`${path}&limit=${Math.min(limit, 50)}`);
-    let orders = d.orders || [];
-    // Filter by date client-side
+    const cap = Math.min(limit, 50);
+    let orders;
     if (from_date || to_date) {
-      orders = orders.filter(o => {
-        if (!o.orderPaidDate) return false;
-        const dt = o.orderPaidDate.slice(0, 10);
-        return (!from_date || dt >= from_date) && (!to_date || dt <= to_date);
-      });
+      // Fetch the whole (widened) window, then trim by Pacific day
+      orders = (await paginate(path, "orders")).filter(o => inPacificRange(o, from_date, to_date));
+    } else {
+      const d = await c7Get(`${path}&limit=${cap}`);
+      orders = d.orders || [];
     }
     if (customer_name) {
       const q = customer_name.toLowerCase();
       orders = orders.filter(o => {
-        const fn = (o.shipTo?.firstName || "").toLowerCase();
-        const ln = (o.shipTo?.lastName || "").toLowerCase();
+        const fn = (o.shipTo?.firstName || o.billTo?.firstName || "").toLowerCase();
+        const ln = (o.shipTo?.lastName || o.billTo?.lastName || "").toLowerCase();
         return fn.includes(q) || ln.includes(q) || `${fn} ${ln}`.includes(q);
       });
     }
+    orders.sort((a, b) => (b.orderPaidDate || "").localeCompare(a.orderPaidDate || ""));
+    const matched = orders.length;
+    orders = orders.slice(0, cap);
     return {
-      total_available: d.total,
+      total_matching: matched,
       returned: orders.length,
+      truncated: matched > orders.length,
       orders: orders.map(o => ({
         order_number:  o.orderNumber,
         date:          o.orderPaidDate,
+        date_pacific:  pacificDay(o.orderPaidDate),
         channel:       o.channel,
-        customer:      `${o.shipTo?.firstName || ""} ${o.shipTo?.lastName || ""}`.trim(),
-        total:         dollars(o.total),
+        pos_profile:   o.posProfile?.title || o.posProfile?.name || undefined,
+        customer:      `${o.shipTo?.firstName || o.billTo?.firstName || ""} ${o.shipTo?.lastName || o.billTo?.lastName || ""}`.trim(),
         subtotal:      dollars(o.subTotal),
+        tax:           dollars(o.taxTotal || 0),
+        total:         dollars(o.total),
+        tip:           dollars(o.tipTotal || 0),
+        total_after_tip: dollars(o.totalAfterTip ?? o.total),
         item_count:    o.items?.length || 0,
-        items:         (o.items || []).map(i => ({ title: i.productTitle, sku: i.sku, qty: i.quantity, price: dollars(i.price) })),
+        items:         (o.items || []).map(i => ({ title: i.productTitle, sku: i.sku, type: i.type, qty: i.quantity, price: dollars(i.price), original_price: dollars(i.originalPrice ?? i.price) })),
         fulfillment:   o.fulfillmentStatus,
         customer_type: o.customerType,
       }))
