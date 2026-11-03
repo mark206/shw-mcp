@@ -437,18 +437,33 @@ async function executeTool(name, args = {}) {
   // ── get_club_members ───────────────────────────────────────────────────────
   if (name === "get_club_members") {
     const { status = "Active", limit = 50 } = args;
-    const path = status === "all" ? "/club-membership?limit=50" : `/club-membership?status=${status}&limit=50`;
     const memberships = await paginate(status === "all" ? "/club-membership" : `/club-membership?status=${status}`, "clubMemberships");
+    // C7 nests the club under m.club and the person under m.customer (there is no m.clubTitle / m.firstName)
+    const perClub = Math.max(1, Math.min(limit, 50));
     const byClub = {};
     for (const m of memberships) {
-      const title = m.clubTitle || "Unknown";
+      const title = m.club?.title || m.clubTitle || "Unknown";
       if (!byClub[title]) byClub[title] = { club: title, count: 0, members: [] };
       byClub[title].count++;
-      if (byClub[title].members.length < 5) {
-        byClub[title].members.push({ name: `${m.firstName || ""} ${m.lastName || ""}`.trim(), email: m.email, signup_date: m.signupDate, status: m.status });
-      }
+      byClub[title].members.push({
+        name:        `${m.customer?.firstName || ""} ${m.customer?.lastName || ""}`.trim() || m.customerId || "",
+        email:       m.customer?.emails?.[0]?.email || m.customer?.email || "",
+        signup_date: pacificDay(m.signupDate || m.createdAt) || null,
+        status:      m.status,
+        ...(m.cancelDate ? { cancel_date: pacificDay(m.cancelDate) } : {}),
+      });
     }
-    return { status_filter: status, total_memberships: memberships.length, by_club: Object.values(byClub).sort((a, b) => b.count - a.count) };
+    for (const c of Object.values(byClub)) {
+      c.members.sort((a, b) => (b.signup_date || "").localeCompare(a.signup_date || ""));   // most recent signups first
+      c.members_shown = Math.min(perClub, c.members.length);
+      c.members = c.members.slice(0, perClub);
+    }
+    return {
+      status_filter: status,
+      total_memberships: memberships.length,
+      note: `members lists show up to ${perClub} most recent signups per club; raise limit (max 50) for more`,
+      by_club: Object.values(byClub).sort((a, b) => b.count - a.count),
+    };
   }
 
   // ── get_customers ──────────────────────────────────────────────────────────
