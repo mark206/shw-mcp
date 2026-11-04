@@ -103,6 +103,20 @@ function apiDateWindow(from_date, to_date) {
   const hi = to_date ? shiftDay(to_date, 2) : "2100-01-01";
   return `&orderPaidDate=btw:${lo}|${hi}`;
 }
+// ── Product -> department lookup (departments are how C7 groups products for accounting) ──
+let deptCache = { at: 0, bySku: {}, byProductId: {} };
+async function getDeptMaps() {
+  if (Date.now() - deptCache.at < 10 * 60 * 1000) return deptCache;
+  const products = await paginate("/product", "products");
+  const bySku = {}, byProductId = {};
+  for (const p of products) {
+    const dept = p.department?.title || p.department?.code || "(none)";
+    byProductId[p.id] = dept;
+    for (const v of (p.variants || [])) if (v.sku) bySku[v.sku] = dept;
+  }
+  deptCache = { at: Date.now(), bySku, byProductId };
+  return deptCache;
+}
 function isWineItem(item) {
   if (item.type) return item.type === "Wine";
   return /^20\d\d_/.test(item.sku || "");
@@ -158,6 +172,7 @@ const TOOLS = [
       to_date:    { type: "string", description: "End date YYYY-MM-DD" },
       channel:    { type: "string", enum: ["all","Web","POS","Club"], default: "all" },
       wine_only:  { type: "boolean", default: true },
+      include_raw_sample: { type: "boolean", default: false, description: "Debug: include the field names of one raw order so available fields can be inspected" },
     }, required: ["from_date","to_date"] },
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
@@ -326,7 +341,9 @@ async function executeTool(name, args = {}) {
 
   // ── get_sales ──────────────────────────────────────────────────────────────
   if (name === "get_sales") {
-    const { from_date, to_date, channel = "all", wine_only = true } = args;
+    const { from_date, to_date, channel = "all", wine_only = true, include_raw_sample = false } = args;
+    const dept = await getDeptMaps().catch(() => ({ bySku: {}, byProductId: {} }));
+    const byDept = {}, byType = {}, tenders = {};
     let basePath = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") basePath += `&channel=${channel}`;
     const allOrders = await paginate(basePath, "orders");
@@ -347,9 +364,19 @@ async function executeTool(name, args = {}) {
         const r = byProduct[item.sku];
         r.units += qty; r.revenue += line; r.gross += gross; r.order_ids.add(o.id);
         lineRevenue += line; grossRevenue += gross; units += qty;
+        const dn = dept.bySku[item.sku] || dept.byProductId[item.productId] || "(unknown)";
+        const d = byDept[dn] || (byDept[dn] = { net: 0, gross: 0, units: 0 });
+        d.net += line; d.gross += gross; d.units += qty;
+        const tn = item.type || "(none)";
+        const t = byType[tn] || (byType[tn] = { net: 0, gross: 0, units: 0 });
+        t.net += line; t.gross += gross; t.units += qty;
         if (isWine) { bottles += qty; hasWine = true; }
       }
       if (hasWine || !wine_only) {
+        for (const pay of (o.payments || o.tenders || [])) {
+          const k = pay.tenderType || pay.paymentType || pay.type || pay.tender || "(unknown)";
+          tenders[k] = (tenders[k] || 0) + (pay.amount ?? pay.total ?? 0);
+        }
         orderIds.add(o.id);
         subTotal += o.subTotal || 0; taxTotal += o.taxTotal || 0; tipTotal += o.tipTotal || 0;
         shipTotal += o.shipTotal || 0; total += o.total || 0; totalAfterTip += o.totalAfterTip || 0;
@@ -380,6 +407,10 @@ async function executeTool(name, args = {}) {
         tips: dollars(tipTotal),
         total_after_tip: dollars(totalAfterTip),
       },
+      by_department: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
+      by_item_type: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
+      tender_totals: Object.keys(tenders).length ? Object.fromEntries(Object.entries(tenders).map(([k, v]) => [k, dollars(v)])) : "no payments/tenders array found on orders (see include_raw_sample)",
+      ...(include_raw_sample && orders[0] ? { raw_order_fields: Object.keys(orders[0]), raw_item_fields: Object.keys((orders[0].items || [])[0] || {}), raw_payment_sample: (orders[0].payments || orders[0].tenders || null) } : {}),
       note: wine_only ? "wine_only=true: non-wine items excluded from revenue/units; order-level totals cover whole orders that contain wine" : "Order-level totals tie to the Commerce7 Day Sales Summary report",
       by_wine: wines
     };
