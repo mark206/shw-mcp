@@ -373,9 +373,12 @@ async function executeTool(name, args = {}) {
         if (isWine) { bottles += qty; hasWine = true; }
       }
       if (hasWine || !wine_only) {
-        for (const pay of (o.payments || o.tenders || [])) {
-          const k = pay.tenderType || pay.paymentType || pay.type || pay.tender || "(unknown)";
-          tenders[k] = (tenders[k] || 0) + (pay.amount ?? pay.total ?? 0);
+        for (const pay of (o.tenders || [])) {
+          const base = pay.tenderType || "(unknown)";
+          const k = (base === "External" && pay.otherPaymentMethod) ? `External: ${pay.otherPaymentMethod}` : base;
+          const key = `${k} | ${pay.chargeType || "?"} | ${pay.chargeStatus || "?"}`;
+          const t = tenders[key] || (tenders[key] = { amount: 0, tip: 0, count: 0 });
+          t.amount += pay.amountTendered || 0; t.tip += pay.tip || 0; t.count++;
         }
         orderIds.add(o.id);
         subTotal += o.subTotal || 0; taxTotal += o.taxTotal || 0; tipTotal += o.tipTotal || 0;
@@ -409,8 +412,15 @@ async function executeTool(name, args = {}) {
       },
       by_department: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
       by_item_type: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
-      tender_totals: Object.keys(tenders).length ? Object.fromEntries(Object.entries(tenders).map(([k, v]) => [k, dollars(v)])) : "no payments/tenders array found on orders (see include_raw_sample)",
-      ...(include_raw_sample && orders[0] ? { raw_order_fields: Object.keys(orders[0]), raw_item_fields: Object.keys((orders[0].items || [])[0] || {}), raw_payment_sample: (orders[0].payments || orders[0].tenders || null) } : {}),
+      tender_totals: Object.fromEntries(Object.entries(tenders).sort().map(([k, v]) => [k, { amount_excl_tip: dollars(v.amount), tips: dollars(v.tip), amount_incl_tip: dollars(v.amount + v.tip), payments: v.count }])),
+      ...(include_raw_sample && orders[0] ? {
+        raw_order_fields: Object.keys(orders[0]),
+        raw_item_fields: Object.keys((orders[0].items || [])[0] || {}),
+        raw_tender_sample: (orders[0].tenders || []).map(({ creditCard, ...rest }) => ({ ...rest, creditCard: creditCard ? { gateway: creditCard.gateway, cardBrand: creditCard.cardBrand } : null })),
+        raw_order_with_coupon: (({ coupons, promotions, discountTotal, subTotal, items }) => ({ coupons, promotions, discountTotal, subTotal, first_item: items?.[0] && { sku: items[0].sku, price: items[0].price, originalPrice: items[0].originalPrice } }))(orders.find(o => (o.coupons || []).length) || {}),
+        raw_order_with_promotion: (({ coupons, promotions, discountTotal }) => ({ coupons, promotions, discountTotal }))(orders.find(o => (o.promotions || []).length) || {}),
+        raw_non_sale_tenders: orders.flatMap(o => (o.tenders || []).filter(t => t.chargeType !== "Sale" || t.chargeStatus !== "Success").map(({ creditCard, ...r }) => r)).slice(0, 3),
+      } : {}),
       note: wine_only ? "wine_only=true: non-wine items excluded from revenue/units; order-level totals cover whole orders that contain wine" : "Order-level totals tie to the Commerce7 Day Sales Summary report",
       by_wine: wines
     };
