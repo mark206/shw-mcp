@@ -103,6 +103,20 @@ function apiDateWindow(from_date, to_date) {
   const hi = to_date ? shiftDay(to_date, 2) : "2100-01-01";
   return `&orderPaidDate=btw:${lo}|${hi}`;
 }
+// ── Product -> department lookup (departments are how C7 groups products for accounting) ──
+let deptCache = { at: 0, bySku: {}, byProductId: {} };
+async function getDeptMaps() {
+  if (Date.now() - deptCache.at < 10 * 60 * 1000) return deptCache;
+  const products = await paginate("/product", "products");
+  const bySku = {}, byProductId = {};
+  for (const p of products) {
+    const dept = p.department?.title || p.department?.code || "(none)";
+    byProductId[p.id] = dept;
+    for (const v of (p.variants || [])) if (v.sku) bySku[v.sku] = dept;
+  }
+  deptCache = { at: Date.now(), bySku, byProductId };
+  return deptCache;
+}
 function isWineItem(item) {
   if (item.type) return item.type === "Wine";
   return /^20\d\d_/.test(item.sku || "");
@@ -158,6 +172,7 @@ const TOOLS = [
       to_date:    { type: "string", description: "End date YYYY-MM-DD" },
       channel:    { type: "string", enum: ["all","Web","POS","Club"], default: "all" },
       wine_only:  { type: "boolean", default: true },
+      include_raw_sample: { type: "boolean", default: false, description: "Debug: include the field names of one raw order so available fields can be inspected" },
     }, required: ["from_date","to_date"] },
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
@@ -326,7 +341,9 @@ async function executeTool(name, args = {}) {
 
   // ── get_sales ──────────────────────────────────────────────────────────────
   if (name === "get_sales") {
-    const { from_date, to_date, channel = "all", wine_only = true } = args;
+    const { from_date, to_date, channel = "all", wine_only = true, include_raw_sample = false } = args;
+    const dept = await getDeptMaps().catch(() => ({ bySku: {}, byProductId: {} }));
+    const byDept = {}, byType = {}, tenders = {}, discByName = {}; let discOrderTotal = 0;
     let basePath = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") basePath += `&channel=${channel}`;
     const allOrders = await paginate(basePath, "orders");
@@ -347,9 +364,28 @@ async function executeTool(name, args = {}) {
         const r = byProduct[item.sku];
         r.units += qty; r.revenue += line; r.gross += gross; r.order_ids.add(o.id);
         lineRevenue += line; grossRevenue += gross; units += qty;
+        const dn = dept.bySku[item.sku] || dept.byProductId[item.productId] || "(unknown)";
+        const d = byDept[dn] || (byDept[dn] = { net: 0, gross: 0, units: 0 });
+        d.net += line; d.gross += gross; d.units += qty;
+        const tn = item.type || "(none)";
+        const t = byType[tn] || (byType[tn] = { net: 0, gross: 0, units: 0 });
+        t.net += line; t.gross += gross; t.units += qty;
         if (isWine) { bottles += qty; hasWine = true; }
       }
       if (hasWine || !wine_only) {
+        for (const pay of (o.tenders || [])) {
+          const base = pay.tenderType || "(unknown)";
+          const k = (base === "External" && pay.otherPaymentMethod) ? `External: ${pay.otherPaymentMethod}` : base;
+          const key = `${k} | ${pay.chargeType || "?"} | ${pay.chargeStatus || "?"}`;
+          const t = tenders[key] || (tenders[key] = { amount: 0, tip: 0, count: 0 });
+          t.amount += pay.amountTendered || 0; t.tip += pay.tip || 0; t.count++;
+        }
+        for (const c of [...(o.coupons || []), ...(o.promotions || [])]) {
+          const n = (c.title || c.code || "(unnamed)") + (o.promotions?.includes(c) ? " [promotion]" : " [coupon]");
+          const d = discByName[n] || (discByName[n] = { value: 0, orders: 0 });
+          d.value += c.totalValue ?? c.productValue ?? 0; d.orders++;
+        }
+        discOrderTotal += o.discountTotal || 0;
         orderIds.add(o.id);
         subTotal += o.subTotal || 0; taxTotal += o.taxTotal || 0; tipTotal += o.tipTotal || 0;
         shipTotal += o.shipTotal || 0; total += o.total || 0; totalAfterTip += o.totalAfterTip || 0;
@@ -380,6 +416,19 @@ async function executeTool(name, args = {}) {
         tips: dollars(tipTotal),
         total_after_tip: dollars(totalAfterTip),
       },
+      by_department: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
+      by_item_type: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
+      discounts_by_name: Object.fromEntries(Object.entries(discByName).sort((a, b) => b[1].value - a[1].value).map(([k, v]) => [k, { total: dollars(v.value), orders: v.orders }])),
+      discounts_order_level_total: dollars(discOrderTotal),   // sum of order.discountTotal; compare with summary.discounts
+      tender_totals: Object.fromEntries(Object.entries(tenders).sort().map(([k, v]) => [k, { amount_excl_tip: dollars(v.amount), tips: dollars(v.tip), amount_incl_tip: dollars(v.amount + v.tip), payments: v.count }])),
+      ...(include_raw_sample && orders[0] ? {
+        raw_order_fields: Object.keys(orders[0]),
+        raw_item_fields: Object.keys((orders[0].items || [])[0] || {}),
+        raw_tender_sample: (orders[0].tenders || []).map(({ creditCard, ...rest }) => ({ ...rest, creditCard: creditCard ? { gateway: creditCard.gateway, cardBrand: creditCard.cardBrand } : null })),
+        raw_order_with_coupon: (({ coupons, promotions, discountTotal, subTotal, items }) => ({ coupons, promotions, discountTotal, subTotal, first_item: items?.[0] && { sku: items[0].sku, price: items[0].price, originalPrice: items[0].originalPrice } }))(orders.find(o => (o.coupons || []).length) || {}),
+        raw_order_with_promotion: (({ coupons, promotions, discountTotal }) => ({ coupons, promotions, discountTotal }))(orders.find(o => (o.promotions || []).length) || {}),
+        raw_non_sale_tenders: orders.flatMap(o => (o.tenders || []).filter(t => t.chargeType !== "Sale" || t.chargeStatus !== "Success").map(({ creditCard, ...r }) => r)).slice(0, 3),
+      } : {}),
       note: wine_only ? "wine_only=true: non-wine items excluded from revenue/units; order-level totals cover whole orders that contain wine" : "Order-level totals tie to the Commerce7 Day Sales Summary report",
       by_wine: wines
     };
