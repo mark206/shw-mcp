@@ -343,7 +343,7 @@ async function executeTool(name, args = {}) {
   if (name === "get_sales") {
     const { from_date, to_date, channel = "all", wine_only = true, include_raw_sample = false } = args;
     const dept = await getDeptMaps().catch(() => ({ bySku: {}, byProductId: {} }));
-    const byDept = {}, byType = {}, tenders = {};
+    const byDept = {}, byType = {}, tenders = {}, discByName = {}; let discOrderTotal = 0;
     let basePath = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") basePath += `&channel=${channel}`;
     const allOrders = await paginate(basePath, "orders");
@@ -380,6 +380,12 @@ async function executeTool(name, args = {}) {
           const t = tenders[key] || (tenders[key] = { amount: 0, tip: 0, count: 0 });
           t.amount += pay.amountTendered || 0; t.tip += pay.tip || 0; t.count++;
         }
+        for (const c of [...(o.coupons || []), ...(o.promotions || [])]) {
+          const n = (c.title || c.code || "(unnamed)") + (o.promotions?.includes(c) ? " [promotion]" : " [coupon]");
+          const d = discByName[n] || (discByName[n] = { value: 0, orders: 0 });
+          d.value += c.totalValue ?? c.productValue ?? 0; d.orders++;
+        }
+        discOrderTotal += o.discountTotal || 0;
         orderIds.add(o.id);
         subTotal += o.subTotal || 0; taxTotal += o.taxTotal || 0; tipTotal += o.tipTotal || 0;
         shipTotal += o.shipTotal || 0; total += o.total || 0; totalAfterTip += o.totalAfterTip || 0;
@@ -412,6 +418,8 @@ async function executeTool(name, args = {}) {
       },
       by_department: Object.fromEntries(Object.entries(byDept).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
       by_item_type: Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { net: dollars(v.net), gross: dollars(v.gross), discount: dollars(v.gross - v.net), units: v.units }])),
+      discounts_by_name: Object.fromEntries(Object.entries(discByName).sort((a, b) => b[1].value - a[1].value).map(([k, v]) => [k, { total: dollars(v.value), orders: v.orders }])),
+      discounts_order_level_total: dollars(discOrderTotal),   // sum of order.discountTotal; compare with summary.discounts
       tender_totals: Object.fromEntries(Object.entries(tenders).sort().map(([k, v]) => [k, { amount_excl_tip: dollars(v.amount), tips: dollars(v.tip), amount_incl_tip: dollars(v.amount + v.tip), payments: v.count }])),
       ...(include_raw_sample && orders[0] ? {
         raw_order_fields: Object.keys(orders[0]),
