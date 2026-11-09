@@ -178,13 +178,15 @@ const TOOLS = [
   },
   {
     name: "get_orders",
-    description: "Get orders with full detail. Date filters use Pacific-time calendar days (matches C7 reports). Filter by date, channel, or customer name.",
+    description: "Get orders with full detail. Date filters use Pacific-time calendar days (matches C7 reports). Filter by date, channel, customer name/ID, or fulfillment status (e.g. unfulfilled club pickups).",
     inputSchema: { type: "object", properties: {
       from_date:     { type: "string", description: "Start date YYYY-MM-DD (optional)" },
       to_date:       { type: "string", description: "End date YYYY-MM-DD (optional)" },
       channel:       { type: "string", enum: ["all","Web","POS","Club"], default: "all" },
       customer_name: { type: "string", description: "Filter by customer name (partial match)" },
-      limit:         { type: "number", default: 20, description: "Max orders to return (default 20, max 50)" },
+      customer_id:   { type: "string", description: "Filter by Commerce7 customer ID (exact)" },
+      fulfillment_status: { type: "string", enum: ["all","Not Fulfilled","Partially Fulfilled","Fulfilled","No Fulfillment Required"], default: "all", description: "Filter by fulfillment status (e.g. Not Fulfilled = awaiting pickup/shipment)" },
+      limit:         { type: "number", default: 20, description: "Max orders to return (default 20, max 200)" },
     }},
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
@@ -436,12 +438,14 @@ async function executeTool(name, args = {}) {
 
   // ── get_orders ─────────────────────────────────────────────────────────────
   if (name === "get_orders") {
-    const { from_date, to_date, channel = "all", customer_name, limit = 20 } = args;
+    const { from_date, to_date, channel = "all", customer_name, customer_id, fulfillment_status = "all", limit = 20 } = args;
     let path = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
     if (channel !== "all") path += `&channel=${channel}`;
-    const cap = Math.min(limit, 50);
+    if (customer_id) path += `&customerId=${encodeURIComponent(customer_id)}`;
+    if (fulfillment_status !== "all") path += `&fulfillmentStatus=${encodeURIComponent(fulfillment_status)}`;
+    const cap = Math.min(limit, 200);
     let orders;
-    if (from_date || to_date) {
+    if (from_date || to_date || customer_id || fulfillment_status !== "all") {
       // Fetch the whole (widened) window, then trim by Pacific day
       orders = (await paginate(path, "orders")).filter(o => inPacificRange(o, from_date, to_date));
     } else {
@@ -478,7 +482,10 @@ async function executeTool(name, args = {}) {
         item_count:    o.items?.length || 0,
         items:         (o.items || []).map(i => ({ title: i.productTitle, sku: i.sku, type: i.type, qty: i.quantity, price: dollars(i.price), original_price: dollars(i.originalPrice ?? i.price) })),
         fulfillment:   o.fulfillmentStatus,
+        delivery_method: o.orderDeliveryMethod,
+        customer_id:   o.customerId,
         customer_type: o.customerType,
+        club_package:  o.clubPackageId ? (o.clubPackage?.title || o.clubPackageId) : undefined,
       }))
     };
   }
