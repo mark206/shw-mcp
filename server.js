@@ -208,7 +208,7 @@ const TOOLS = [
   },
   {
     name: "get_reservations",
-    description: "Get upcoming or recent reservations. Filter by date range or status.",
+    description: "Get reservations with customer name, email, guest count and club status. Filter by Pacific-day date range (from_date/to_date, inclusive) and/or status.",
     inputSchema: { type: "object", properties: {
       from_date: { type: "string", description: "Start date YYYY-MM-DD (optional)" },
       to_date:   { type: "string", description: "End date YYYY-MM-DD (optional)" },
@@ -540,26 +540,52 @@ async function executeTool(name, args = {}) {
   // ── get_reservations ───────────────────────────────────────────────────────
   if (name === "get_reservations") {
     const { from_date, to_date, status, limit = 20 } = args;
-    let path = `/reservation?limit=${Math.min(limit, 50)}`;
-    if (from_date) path += `&reservationDate=gt:${from_date}`;
-    if (to_date)   path += `&reservationDate=lt:${to_date}`;
-    if (status)    path += `&status=${status}`;
-    const d = await c7Get(path);
-    const reservations = d.reservations || [];
+    // C7 rejects two separate reservationDate params; use a single btw: range,
+    // padded a day each side (API filter is UTC date-only), then trim by Pacific day.
+    let extra = "";
+    if (from_date || to_date) {
+      const lo = from_date ? shiftDay(from_date, -1) : "2000-01-01";
+      const hi = to_date ? shiftDay(to_date, 2) : "2100-01-01";
+      extra += `&reservationDate=btw:${lo}|${hi}`;
+    }
+    if (status) extra += `&status=${encodeURIComponent(status)}`;
+    let reservations;
+    if (from_date || to_date) {
+      reservations = await paginate("/reservation", "reservations", extra);
+      reservations = reservations.filter(r => {
+        const day = pacificDay(r.reservationDate);
+        return day && (!from_date || day >= from_date) && (!to_date || day <= to_date);
+      });
+    } else {
+      const d = await c7Get(`/reservation?limit=${Math.min(limit, 50)}${extra}`);
+      reservations = d.reservations || [];
+    }
+    reservations.sort((a, b) => (a.reservationDate || "").localeCompare(b.reservationDate || ""));
+    const pacTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     return {
-      total_available: d.total,
-      returned: reservations.length,
-      reservations: reservations.map(r => ({
-        id:           r.id,
-        date:         r.reservationDate,
-        party_size:   r.partySize,
-        status:       r.status,
-        customer:     `${r.firstName || ""} ${r.lastName || ""}`.trim(),
-        email:        r.email || "",
-        phone:        r.phone || "",
-        location:     LOCATION_NAMES[r.inventoryLocationId] || r.inventoryLocationId,
-        notes:        r.notes || "",
-      }))
+      total: reservations.length,
+      reservations: reservations.map(r => {
+        const cu = r.customer || {};
+        const first = cu.firstName || r.firstName || "";
+        const last  = cu.lastName  || r.lastName  || "";
+        return {
+          id:                 r.id,
+          reservation_number: r.reservationNumber,
+          date:               r.reservationDate,
+          date_pacific:       r.reservationDate ? pacTime.format(new Date(r.reservationDate)) : null,
+          guest_count:        r.guestCount,
+          status:             r.status,
+          experience:         r.reservationType?.title || r.reservationType?.name || null,
+          customer_id:        r.customerId || cu.id || null,
+          customer:           `${first} ${last}`.trim(),
+          email:              cu.emails?.[0]?.email || r.email || "",
+          phone:              cu.phones?.[0]?.phone || r.phone || "",
+          club_status:        cu.orderInformation?.currentClubTitle || null,
+          is_club_member:     cu.orderInformation?.isActiveClubMember ?? null,
+          location:           LOCATION_NAMES[r.inventoryLocationId] || r.inventoryLocationId,
+          notes:              r.notes || "",
+        };
+      })
     };
   }
 
