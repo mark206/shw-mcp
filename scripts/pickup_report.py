@@ -2,7 +2,8 @@
 """Fall Club Pickup Weekend report for Spruce Hill Winery (Gig Harbor).
 
 Usage:
-  python3 -I pickup_report.py reservations.json orders.json OUT.pdf "Nov 12, 2026" [prev_summary.json]
+  python3 -I pickup_report.py reservations.json orders.json OUT.pdf "Nov 12, 2026" [prev_summary.json] [start_day YYYY-MM-DD]
+start_day (optional) drops reservations on Pacific days before it, so a Friday run covers Fri..Sun only.
 
 reservations.json : raw output of C7 Hookup get_reservations (from_date..to_date)
 orders.json       : raw output of C7 Hookup get_orders (channel=Club, fulfillment_status=Not Fulfilled, limit=200)
@@ -21,7 +22,8 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 def load(p):
     raw=open(p,encoding='utf-8').read(); return json.loads(raw[raw.index('{'):])
 res_file, ord_file, OUT, PREPARED = sys.argv[1:5]
-PREV = json.load(open(sys.argv[5])) if len(sys.argv)>5 else None
+PREV = json.load(open(sys.argv[5])) if len(sys.argv)>5 and sys.argv[5] not in ('','-') else None
+START = sys.argv[6] if len(sys.argv)>6 else None
 resos=load(res_file)['reservations']; orders=load(ord_file)['orders']
 resos=[r for r in resos if r.get('status') not in ('Cancelled','No Show')]
 byc=defaultdict(list)
@@ -30,6 +32,7 @@ for o in orders: byc[o['customer_id']].append(o)
 def pac(iso):  # UTC iso -> aware Pacific datetime (PST in Nov)
     return datetime.fromisoformat(iso.replace('Z','+00:00')).astimezone(timezone(timedelta(hours=-8)))
 def wine_btl(o): return sum(i['qty'] for i in o['items'] if i['type']=='Wine')
+if START: resos=[r for r in resos if pac(r['date']).strftime('%Y-%m-%d')>=START]
 
 ss=getSampleStyleSheet(); green=colors.HexColor('#2f4f3a'); light=colors.HexColor('#eef3ef')
 H1=ParagraphStyle('h1',parent=ss['Title'],fontSize=18,spaceAfter=4,alignment=0)
@@ -85,18 +88,33 @@ big=[n for n,b in per_member.items() if b==12]
 if big: flags.append("12-bottle pickups: "+", ".join(big)+".")
 flags.append(f"Beyond this weekend: {len(others)} more unfulfilled pickup orders ({ob} bottles) from members without a reservation, {oldn} of them from an older release.")
 
+day_members=defaultdict(list)
+for r in resos: day_members[pac(r['date']).strftime('%Y-%m-%d')].append(r['customer'])
 summary={"prepared":PREPARED,"reservations":nres,"guests":ng,"bottles":total,"by_wine":dict(wine),"per_member":per_member,"others":len(others),"other_bottles":ob,
-         "members":sorted({r['customer'] for r in resos})}
+         "members":sorted({r['customer'] for r in resos}),"day_members":dict(day_members)}
 changes=[]
 if PREV:
     new=set(summary['members'])-set(PREV.get('members',[])); gone=set(PREV.get('members',[]))-set(summary['members'])
+    if START and PREV.get('day_members'):
+        # members whose baseline day is already past are not "dropped", just out of scope
+        past={m for d,ms in PREV['day_members'].items() if d<START for m in ms}
+        gone-=past
     if new: changes.append("New reservations: "+", ".join(sorted(new))+".")
-    if gone: changes.append("Dropped reservations: "+", ".join(sorted(gone))+".")
+    if gone: changes.append("Dropped or cancelled reservations: "+", ".join(sorted(gone))+".")
+    for m in sorted(set(summary['members'])&set(PREV.get('members',[]))):
+        if m in per_member and PREV.get('per_member',{}).get(m,0)>0 and per_member[m]==0: pass
+    picked_early=[m for m in summary['members'] if m in PREV.get('per_member',{}) and PREV['per_member'][m]>0 and m not in per_member]
+    if picked_early: changes.append("Already picked up (order now fulfilled) but still holding a reservation: "+", ".join(picked_early)+".")
     for m,b in per_member.items():
         pb=PREV.get('per_member',{}).get(m)
         if pb is not None and pb!=b: changes.append(f"{m}: {pb} -> {b} bottles.")
         if pb is None and m in PREV.get('members',[]) and b: changes.append(f"{m}: club order now processed ({b} bottles).")
-    changes.append(f"Total bottles: {PREV.get('bottles')} -> {total}. Reservations: {PREV.get('reservations')} -> {nres}.")
+    if START and PREV.get('day_members'):
+        pm=PREV.get('per_member',{}); pdm=PREV['day_members']
+        prev_scope=[m for d,ms in pdm.items() if d>=START for m in ms]
+        changes.append(f"Remaining days vs {PREV.get('prepared')}: bottles {sum(pm.get(m,0) for m in prev_scope)} -> {total}, reservations {len(prev_scope)} -> {nres}.")
+    else:
+        changes.append(f"Total bottles: {PREV.get('bottles')} -> {total}. Reservations: {PREV.get('reservations')} -> {nres}.")
 
 story=[Paragraph("Spruce Hill Winery",ParagraphStyle('x',parent=N,textColor=green,fontSize=10)),
  Paragraph("Fall Wine Club Pickup Weekend: Gig Harbor",H1),
