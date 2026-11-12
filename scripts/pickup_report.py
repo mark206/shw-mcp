@@ -17,7 +17,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether, Flowable
 
 def load(p):
     raw=open(p,encoding='utf-8').read(); return json.loads(raw[raw.index('{'):])
@@ -50,7 +50,7 @@ def tbl(data,widths,align_right=(),bold_last=False):
     if bold_last: st.append(('FONT',(0,-1),(-1,-1),'Helvetica-Bold',9))
     t.setStyle(TableStyle(st)); return t
 
-wine=Counter(); perday={}; rows=defaultdict(list); total=0; flags=[]; slots=Counter(); seen_orders=set(); per_member={}
+wine=Counter(); perday={}; rows=defaultdict(list); total=0; flags=[]; slots=Counter(); seen_orders=set(); per_member={}; tl=defaultdict(list)
 days=[]
 for r in sorted(resos,key=lambda r:r['date']):
     dt=pac(r['date']); dkey=dt.strftime('%Y-%m-%d'); dlabel=dt.strftime('%A, %b %-d'); short=dt.strftime('%a'); time=dt.strftime('%-I:%M')
@@ -59,6 +59,15 @@ for r in sorted(resos,key=lambda r:r['date']):
     name=r['customer'] or '(no name)'; g=str(r.get('guest_count') or ''); note=r.get('notes','').strip()
     is_pickup='Pickup' in (r.get('experience') or '') or 'Club' in (r.get('experience') or '')
     os_=byc.get(r.get('customer_id'),[])
+    cs=(r.get('club_status') or '')
+    nb=sum(wine_btl(o) for o in os_) if is_pickup else 0
+    if not is_pickup: tier='table'
+    elif not os_: tier='none'
+    elif '12' in cs or nb>=12: tier='adventure'
+    elif '3 Bottle' in cs or nb<=3: tier='wanderer'
+    elif '6' in cs or nb>=6: tier='explorer'
+    else: tier='other'
+    tl[dkey].append({'t':dt.hour+dt.minute/60,'last':(name.split()[-1] if name else '?'),'g':r.get('guest_count') or 0,'b':nb,'tier':tier})
     if not is_pickup:
         rows[dkey].append([time,name,g,'--','0',Paragraph(f"<b>{r.get('experience') or 'Reservation'}</b> (not a club pickup){', '+note if note else ''}",Sm)])
         flags.append(f"{name} ({short} {time} PM): {r.get('experience')} for {g}, not a club pickup."); continue
@@ -136,6 +145,49 @@ for dkey in days:
     v=perday[dkey]
     story.append(KeepTogether([Paragraph(f"{v[0]}: {v[1]} reservations, {v[2]} guests, {v[3]} bottles",H2),
         tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.5*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.7*inch],(2,3,4))]))
+TIER_COL={'explorer':('#E1F5EE','#0F6E56','#04342C'),'wanderer':('#EEEDFE','#534AB7','#26215C'),'adventure':('#FAECE7','#993C1D','#4A1B0C'),
+          'none':('#F1EFE8','#5F5E5A','#2C2C2A'),'table':('#FAEEDA','#854F0B','#412402'),'other':('#E6F1FB','#185FA5','#042C53')}
+TIER_LBL={'explorer':'Explorer (6)','wanderer':'Wanderer (3)','adventure':'Adventure (12)','none':'No club order','table':'Table reso','other':'Other club'}
+class Timeline(Flowable):
+    def __init__(self,items,width=7.0*inch,dur=1.5):
+        super().__init__(); self.items=sorted(items,key=lambda i:(i['t'],-i['b'])); self.w=width; self.dur=dur
+        self.row=15; self.top=34; self.left=54; self.height=self.top+len(self.items)*self.row+12
+    def wrap(self,aw,ah): return self.w,self.height
+    def draw(self):
+        c=self.canv; it=self.items
+        if not it: return
+        t0=int(min(i['t'] for i in it)); t1=max(i['t'] for i in it)+self.dur; t1=int(t1)+(1 if t1%1 else 0)
+        span=max(t1-t0,1); px=(self.w-self.left-10)/span
+        X=lambda t:self.left+(t-t0)*px
+        H=self.height
+        c.setFont('Helvetica',8); c.setStrokeColor(colors.HexColor('#B4B2A9')); c.setLineWidth(0.4); c.setDash(2,2)
+        for h in range(t0,t1+1):
+            x=X(h); c.line(x,H-self.top+4,x,8)
+            c.setFillColor(colors.HexColor('#5F5E5A')); c.drawCentredString(x,H-10,f"{(h-1)%12+1} {'pm' if h>=12 else 'am'}")
+        c.setDash()
+        cnt=Counter(round(i['t'],2) for i in it)
+        for t,n in cnt.items():
+            c.setFillColor(colors.HexColor('#5F5E5A')); c.drawString(X(t)+3,H-24,f"{n} {'party' if n==1 else 'parties'}")
+        y=H-self.top-self.row
+        for i in it:
+            fill,stroke,txt=TIER_COL[i['tier']]; x=X(i['t']); w=self.dur*px
+            c.setFillColor(colors.HexColor(fill)); c.setStrokeColor(colors.HexColor(stroke)); c.setLineWidth(0.5)
+            c.roundRect(x,y,w,self.row-3,2,fill=1,stroke=1)
+            c.setFillColor(colors.HexColor(txt)); c.setFont('Helvetica-Bold',8); c.drawString(x+4,y+3.5,i['last'][:16])
+            c.setFont('Helvetica',8); c.setFillColor(colors.HexColor('#444441'))
+            lab=f"{i['g']} gst, {i['b']} btl" if i['tier'] not in ('none','table') else (f"{i['g']} gst, no order yet" if i['tier']=='none' else f"{i['g']} gst, table only")
+            if x+w+4+c.stringWidth(lab,'Helvetica',8)<=self.w: c.drawString(x+w+4,y+3.5,lab)
+            else: c.drawRightString(x-4,y+3.5,lab)
+            y-=self.row
+        c.setFont('Helvetica',7.5); x=self.left; y=2
+        for k in ['explorer','wanderer','adventure','none','table']:
+            if any(i['tier']==k for i in it):
+                fill,stroke,_=TIER_COL[k]; c.setFillColor(colors.HexColor(fill)); c.setStrokeColor(colors.HexColor(stroke)); c.roundRect(x,y,8,8,1.5,fill=1,stroke=1)
+                c.setFillColor(colors.HexColor('#444441')); c.drawString(x+11,y+1,TIER_LBL[k]); x+=11+c.stringWidth(TIER_LBL[k],'Helvetica',7.5)+14
+story+=[PageBreak(),Paragraph("Arrival Timelines",H1),Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm)]
+for dkey in days:
+    v=perday[dkey]
+    story.append(KeepTogether([Paragraph(f"{v[0]}: {v[1]} reservations, {v[2]} guests, {v[3]} bottles",H2),Timeline(tl[dkey]),Spacer(1,6)]))
 def footer(c,doc):
     c.setFont('Helvetica',7.5); c.setFillColor(colors.grey)
     c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup Weekend, Gig Harbor | Source: Commerce7, {PREPARED}")
