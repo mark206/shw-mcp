@@ -32,6 +32,7 @@ for o in orders: byc[o['customer_id']].append(o)
 def pac(iso):  # UTC iso -> aware Pacific datetime (PST in Nov)
     return datetime.fromisoformat(iso.replace('Z','+00:00')).astimezone(timezone(timedelta(hours=-8)))
 def wine_btl(o): return sum(i['qty'] for i in o['items'] if i['type']=='Wine')
+all_rids={r.get('customer_id') for r in resos}
 if START: resos=[r for r in resos if pac(r['date']).strftime('%Y-%m-%d')>=START]
 
 ss=getSampleStyleSheet(); green=colors.HexColor('#2f4f3a'); light=colors.HexColor('#eef3ef')
@@ -88,8 +89,7 @@ for r in sorted(resos,key=lambda r:r['date']):
     elif mb>12: flags.append(f"{name} ({short} {time} PM): customized order, {mb} bottles.")
     if note and not any(k in note.lower() for k in ('restriction',)): flags.append(f"{name} ({short} {time} PM) note: {note}")
 
-rids={r.get('customer_id') for r in resos}
-others=[o for o in orders if o['customer_id'] not in rids and o['delivery_method']=='Pickup']
+others=[o for o in orders if o['customer_id'] not in all_rids and o['delivery_method']=='Pickup']
 ob=sum(wine_btl(o) for o in others); oldn=sum(1 for o in others if o['date_pacific']<'2026-10-01')
 nres=sum(v[1] for v in perday.values()); ng=sum(v[2] for v in perday.values())
 top=slots.most_common(1)[0] if slots else ("",0)
