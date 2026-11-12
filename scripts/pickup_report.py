@@ -56,7 +56,7 @@ for r in sorted(resos,key=lambda r:r['date']):
     dt=pac(r['date']); dkey=dt.strftime('%Y-%m-%d'); dlabel=dt.strftime('%A, %b %-d'); short=dt.strftime('%a'); time=dt.strftime('%-I:%M')
     if dkey not in perday: perday[dkey]=[dlabel,0,0,0]; days.append(dkey)
     perday[dkey][1]+=1; perday[dkey][2]+=r.get('guest_count') or 0; slots[f"{dlabel} {time} PM"]+=1
-    name=r['customer'] or '(no name)'; g=str(r.get('guest_count') or ''); note=r.get('notes','').strip(); tb=str(r.get('table') or '')
+    name=r['customer'] or '(no name)'; g=str(r.get('guest_count') or ''); note=r.get('notes','').strip(); tb=Paragraph(str(r.get('table') or '').replace('Table ','T').replace('Community Table','Community').replace('Couch Area','Couch'),Sm)
     is_pickup='Pickup' in (r.get('experience') or '') or 'Club' in (r.get('experience') or '')
     os_=byc.get(r.get('customer_id'),[])
     cs=(r.get('club_status') or '')
@@ -79,7 +79,7 @@ for r in sorted(resos,key=lambda r:r['date']):
         seen_orders.add(o['order_number']); b=wine_btl(o); total+=b; mb+=b; perday[dkey][3]+=b
         for i in o['items']:
             if i['type']=='Wine': wine[i['title']]+=i['qty']
-        it=", ".join(f"{i['qty']}x {i['title']}" for i in o['items'])
+        it=", ".join(f"{i['qty']}x {re.sub(r'^(19|20)[0-9][0-9] ','',i['title'])}" for i in o['items'])
         old=o['date_pacific']<'2026-10-01'
         tag=" <b>(older release, still unclaimed)</b>" if old else ""
         rows[dkey].append([time,tb,name,g,str(o['order_number']),str(b),Paragraph(it+tag+(f"<br/><b>Note:</b> {note}" if note and not old else ""),Sm)])
@@ -146,7 +146,7 @@ TIER_LBL={'explorer':'Explorer (6)','wanderer':'Wanderer (3)','adventure':'Adven
 class Timeline(Flowable):
     def __init__(self,items,width=7.0*inch,dur=1.5):
         super().__init__(); self.items=sorted(items,key=lambda i:(i['t'],-i['b'])); self.w=width; self.dur=dur
-        self.row=15; self.top=34; self.left=54; self.height=self.top+len(self.items)*self.row+12
+        self.row=13; self.top=32; self.left=54; self.height=self.top+len(self.items)*self.row+12
     def wrap(self,aw,ah): return self.w,self.height
     def draw(self):
         c=self.canv; it=self.items
@@ -167,12 +167,12 @@ class Timeline(Flowable):
         for i in it:
             fill,stroke,txt=TIER_COL[i['tier']]; x=X(i['t']); w=self.dur*px
             c.setFillColor(colors.HexColor(fill)); c.setStrokeColor(colors.HexColor(stroke)); c.setLineWidth(0.5)
-            c.roundRect(x,y,w,self.row-3,2,fill=1,stroke=1)
-            c.setFillColor(colors.HexColor(txt)); c.setFont('Helvetica-Bold',8); c.drawString(x+4,y+3.5,i['last'][:16])
+            c.roundRect(x,y,w,self.row-2.5,2,fill=1,stroke=1)
+            c.setFillColor(colors.HexColor(txt)); c.setFont('Helvetica-Bold',8); c.drawString(x+4,y+2.8,i['last'][:16])
             c.setFont('Helvetica',8); c.setFillColor(colors.HexColor('#444441'))
             lab=f"{i['g']} gst, {i['b']} btl" if i['tier'] not in ('none','table') else (f"{i['g']} gst, no order yet" if i['tier']=='none' else f"{i['g']} gst, table only")
-            if x+w+4+c.stringWidth(lab,'Helvetica',8)<=self.w: c.drawString(x+w+4,y+3.5,lab)
-            else: c.drawRightString(x-4,y+3.5,lab)
+            if x+w+4+c.stringWidth(lab,'Helvetica',8)<=self.w: c.drawString(x+w+4,y+2.8,lab)
+            else: c.drawRightString(x-4,y+2.8,lab)
             y-=self.row
         c.setFont('Helvetica',7.5); x=self.left; y=2
         for k in ['explorer','wanderer','adventure','none','table']:
@@ -184,10 +184,10 @@ for dkey in days:
     story+=[PageBreak(),Paragraph(f"{v[0]}",H1),
             Paragraph(f"{v[1]} reservations, {v[2]} guests, {v[3]} bottles to hand out.",N),
             Paragraph("Reservations",H2),
-            tbl([["Time","Table","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.45*inch,0.5*inch,1.3*inch,0.5*inch,0.5*inch,0.4*inch,3.35*inch],(3,4,5)),
-            Paragraph("Arrival timeline",H2),
+            tbl([["Time","Table","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.4*inch,0.78*inch,1.2*inch,0.38*inch,0.42*inch,0.32*inch,3.5*inch],(3,4,5)),
+            KeepTogether([Paragraph("Arrival timeline",H2),
             Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm),
-            Spacer(1,4),Timeline(tl[dkey])]
+            Spacer(1,4),Timeline(tl[dkey])])]
 def footer(c,doc):
     c.setFont('Helvetica',7.5); c.setFillColor(colors.grey)
     c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup Weekend, Gig Harbor | Source: Commerce7, {PREPARED}")
