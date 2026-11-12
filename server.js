@@ -583,6 +583,8 @@ async function executeTool(name, args = {}) {
           guest_count:        r.guestCount,
           status:             r.status,
           experience:         r.reservationType?.title || r.reservationType?.name || null,
+          table:              r.table?.title || r.table?.name || r.table?.number || null,
+          room:               r.location?.title || r.location?.name || null,
           customer_id:        r.customerId || cu.id || null,
           customer:           `${first} ${last}`.trim(),
           email:              cu.emails?.[0]?.email || r.email || "",

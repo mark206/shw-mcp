@@ -56,7 +56,7 @@ for r in sorted(resos,key=lambda r:r['date']):
     dt=pac(r['date']); dkey=dt.strftime('%Y-%m-%d'); dlabel=dt.strftime('%A, %b %-d'); short=dt.strftime('%a'); time=dt.strftime('%-I:%M')
     if dkey not in perday: perday[dkey]=[dlabel,0,0,0]; days.append(dkey)
     perday[dkey][1]+=1; perday[dkey][2]+=r.get('guest_count') or 0; slots[f"{dlabel} {time} PM"]+=1
-    name=r['customer'] or '(no name)'; g=str(r.get('guest_count') or ''); note=r.get('notes','').strip()
+    name=r['customer'] or '(no name)'; g=str(r.get('guest_count') or ''); note=r.get('notes','').strip(); tb=str(r.get('table') or '')
     is_pickup='Pickup' in (r.get('experience') or '') or 'Club' in (r.get('experience') or '')
     os_=byc.get(r.get('customer_id'),[])
     cs=(r.get('club_status') or '')
@@ -72,7 +72,7 @@ for r in sorted(resos,key=lambda r:r['date']):
         rows[dkey].append([time,name,g,'--','0',Paragraph(f"<b>{r.get('experience') or 'Reservation'}</b> (not a club pickup){', '+note if note else ''}",Sm)])
         flags.append(f"{name} ({short} {time} PM): {r.get('experience')} for {g}, not a club pickup."); continue
     if not os_:
-        rows[dkey].append([time,name,g,'--','0',Paragraph("<b>NO UNFULFILLED CLUB ORDER.</b> Check C7."+(f" Note: {note}" if note else ""),Sm)])
+        rows[dkey].append([time,tb,name,g,'--','0',Paragraph("<b>NO UNFULFILLED CLUB ORDER.</b> Check C7."+(f" Note: {note}" if note else ""),Sm)])
         flags.append(f"{name} ({short} {time} PM): no unfulfilled club order found. Card declined, skipped, already picked up, or under another account?"); continue
     mb=0
     for o in os_:
@@ -82,7 +82,7 @@ for r in sorted(resos,key=lambda r:r['date']):
         it=", ".join(f"{i['qty']}x {i['title']}" for i in o['items'])
         old=o['date_pacific']<'2026-10-01'
         tag=" <b>(older release, still unclaimed)</b>" if old else ""
-        rows[dkey].append([time,name,g,str(o['order_number']),str(b),Paragraph(it+tag+(f"<br/><b>Note:</b> {note}" if note and not old else ""),Sm)])
+        rows[dkey].append([time,tb,name,g,str(o['order_number']),str(b),Paragraph(it+tag+(f"<br/><b>Note:</b> {note}" if note and not old else ""),Sm)])
     per_member[name]=mb
     if len(os_)>1: flags.append(f"{name} ({short} {time} PM): {len(os_)} unfulfilled orders to hand over ({', '.join(str(o['order_number']) for o in os_)}).")
     elif mb>12: flags.append(f"{name} ({short} {time} PM): customized order, {mb} bottles.")
@@ -184,7 +184,7 @@ for dkey in days:
     story+=[PageBreak(),Paragraph(f"{v[0]}",H1),
             Paragraph(f"{v[1]} reservations, {v[2]} guests, {v[3]} bottles to hand out.",N),
             Paragraph("Reservations",H2),
-            tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.5*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.7*inch],(2,3,4)),
+            tbl([["Time","Table","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.45*inch,0.5*inch,1.3*inch,0.5*inch,0.5*inch,0.4*inch,3.35*inch],(3,4,5)),
             Paragraph("Arrival timeline",H2),
             Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm),
             Spacer(1,4),Timeline(tl[dkey])]
