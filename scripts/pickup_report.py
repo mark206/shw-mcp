@@ -140,11 +140,6 @@ if changes:
     for c in changes: story.append(Paragraph(c,B,bulletText="•"))
 story.append(Paragraph("Flags for Staff",H2))
 for f in flags: story.append(Paragraph(f,B,bulletText="•"))
-story+=[PageBreak(),Paragraph("Reservation Detail",H1)]
-for dkey in days:
-    v=perday[dkey]
-    story.append(KeepTogether([Paragraph(f"{v[0]}: {v[1]} reservations, {v[2]} guests, {v[3]} bottles",H2),
-        tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.5*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.7*inch],(2,3,4))]))
 TIER_COL={'explorer':('#E1F5EE','#0F6E56','#04342C'),'wanderer':('#EEEDFE','#534AB7','#26215C'),'adventure':('#FAECE7','#993C1D','#4A1B0C'),
           'none':('#F1EFE8','#5F5E5A','#2C2C2A'),'table':('#FAEEDA','#854F0B','#412402'),'other':('#E6F1FB','#185FA5','#042C53')}
 TIER_LBL={'explorer':'Explorer (6)','wanderer':'Wanderer (3)','adventure':'Adventure (12)','none':'No club order','table':'Table reso','other':'Other club'}
@@ -184,10 +179,15 @@ class Timeline(Flowable):
             if any(i['tier']==k for i in it):
                 fill,stroke,_=TIER_COL[k]; c.setFillColor(colors.HexColor(fill)); c.setStrokeColor(colors.HexColor(stroke)); c.roundRect(x,y,8,8,1.5,fill=1,stroke=1)
                 c.setFillColor(colors.HexColor('#444441')); c.drawString(x+11,y+1,TIER_LBL[k]); x+=11+c.stringWidth(TIER_LBL[k],'Helvetica',7.5)+14
-story+=[PageBreak(),Paragraph("Arrival Timelines",H1),Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm)]
 for dkey in days:
     v=perday[dkey]
-    story.append(KeepTogether([Paragraph(f"{v[0]}: {v[1]} reservations, {v[2]} guests, {v[3]} bottles",H2),Timeline(tl[dkey]),Spacer(1,6)]))
+    story+=[PageBreak(),Paragraph(f"{v[0]}",H1),
+            Paragraph(f"{v[1]} reservations, {v[2]} guests, {v[3]} bottles to hand out.",N),
+            Paragraph("Reservations",H2),
+            tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.5*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.7*inch],(2,3,4)),
+            Paragraph("Arrival timeline",H2),
+            Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm),
+            Spacer(1,4),Timeline(tl[dkey])]
 def footer(c,doc):
     c.setFont('Helvetica',7.5); c.setFillColor(colors.grey)
     c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup Weekend, Gig Harbor | Source: Commerce7, {PREPARED}")
