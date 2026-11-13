@@ -73,17 +73,19 @@ for r in sorted(resos,key=lambda r:r['date']):
         rows[dkey].append([time,name,g,'--','0',Paragraph(f"<b>{r.get('experience') or 'Reservation'}</b> (not a club pickup){', '+note if note else ''}",Sm)])
         flags.append(f"{name} ({short} {time} PM): {r.get('experience')} for {g}, not a club pickup."); continue
     if not os_:
-        rows[dkey].append([time,tb,name,g,'--','0',Paragraph("<b>NO UNFULFILLED CLUB ORDER.</b> Check C7."+(f" Note: {note}" if note else ""),Sm)])
+        rows[dkey].append([time,name,g,'--','0',Paragraph("<b>NO UNFULFILLED CLUB ORDER.</b> Check C7."+(f" Note: {note}" if note else ""),Sm)])
         flags.append(f"{name} ({short} {time} PM): no unfulfilled club order found. Card declined, skipped, already picked up, or under another account?"); continue
-    mb=0
-    for o in os_:
-        seen_orders.add(o['order_number']); b=wine_btl(o); total+=b; mb+=b; perday[dkey][3]+=b
+    mb=0; parts=[]; ordnums=[]
+    for o in sorted(os_,key=lambda o:o['date_pacific'],reverse=True):
+        seen_orders.add(o['order_number']); b=wine_btl(o); total+=b; mb+=b; perday[dkey][3]+=b; ordnums.append(str(o['order_number']))
         for i in o['items']:
             if i['type']=='Wine': wine[i['title']]+=i['qty']
         it=", ".join(f"{i['qty']}x {re.sub(r'^(19|20)[0-9][0-9] ','',i['title'])}" for i in o['items'])
         old=o['date_pacific']<'2026-10-01'
-        tag=" <b>(older release, still unclaimed)</b>" if old else ""
-        rows[dkey].append([time,tb,name,g,str(o['order_number']),str(b),Paragraph(it+tag+(f"<br/><b>Note:</b> {note}" if note and not old else ""),Sm)])
+        parts.append((f"<b>Order {o['order_number']} (older release, still unclaimed):</b> " if old and len(os_)>1 else (f"<b>Order {o['order_number']}:</b> " if len(os_)>1 else ""))+it+(" <b>(older release, still unclaimed)</b>" if old and len(os_)==1 else ""))
+    cell="<br/>".join(parts)+(f"<br/><b>Note:</b> {note}" if note else "")
+    rows[dkey].append([time,name,g,"<br/>".join(ordnums) if len(ordnums)>1 else ordnums[0],str(mb),Paragraph(cell,Sm)])
+    rows[dkey][-1][3]=Paragraph(rows[dkey][-1][3],Sm)
     per_member[name]=mb
     if len(os_)>1: flags.append(f"{name} ({short} {time} PM): {len(os_)} unfulfilled orders to hand over ({', '.join(str(o['order_number']) for o in os_)}).")
     elif mb>12: flags.append(f"{name} ({short} {time} PM): customized order, {mb} bottles.")
@@ -170,7 +172,8 @@ class Timeline(Flowable):
             c.roundRect(x,y,w,self.row-2.5,2,fill=1,stroke=1)
             c.setFillColor(colors.HexColor(txt)); c.setFont('Helvetica-Bold',8); c.drawString(x+4,y+2.8,i['last'][:16])
             c.setFont('Helvetica',8); c.setFillColor(colors.HexColor('#444441'))
-            lab=f"{i['g']} gst, {i['b']} btl" if i['tier'] not in ('none','table') else (f"{i['g']} gst, no order yet" if i['tier']=='none' else f"{i['g']} gst, table only")
+            gw='guest' if i['g']==1 else 'guests'
+            lab=f"{i['g']} {gw}" if i['tier'] not in ('none','table') else (f"{i['g']} {gw}, no order yet" if i['tier']=='none' else f"{i['g']} {gw}, table only")
             if x+w+4+c.stringWidth(lab,'Helvetica',8)<=self.w: c.drawString(x+w+4,y+2.8,lab)
             else: c.drawRightString(x-4,y+2.8,lab)
             y-=self.row
@@ -184,7 +187,7 @@ for dkey in days:
     story+=[PageBreak(),Paragraph(f"{v[0]}",H1),
             Paragraph(f"{v[1]} reservations, {v[2]} guests, {v[3]} bottles to hand out.",N),
             Paragraph("Reservations",H2),
-            tbl([["Time","Table","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.4*inch,0.78*inch,1.2*inch,0.38*inch,0.42*inch,0.32*inch,3.5*inch],(3,4,5)),
+            tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.45*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.75*inch],(2,3,4)),
             KeepTogether([Paragraph("Arrival timeline",H2),
             Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm),
             Spacer(1,4),Timeline(tl[dkey])])]
