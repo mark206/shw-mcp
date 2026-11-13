@@ -2,7 +2,8 @@
 """Fall Club Pickup Weekend report for Spruce Hill Winery (Gig Harbor).
 
 Usage:
-  python3 -I pickup_report.py reservations.json orders.json OUT.pdf "Nov 12, 2026" [prev_summary.json] [start_day YYYY-MM-DD]
+  python3 -I pickup_report.py reservations.json orders.json OUT.pdf "Nov 12, 2026" [prev_summary.json|-] [start_day YYYY-MM-DD|-] [location]
+location defaults to "Gig Harbor"; pass "Seattle" for the SoDo tasting room.
 start_day (optional) drops reservations on Pacific days before it, so a Friday run covers Fri..Sun only.
 
 reservations.json : raw output of C7 Hookup get_reservations (from_date..to_date)
@@ -23,9 +24,10 @@ def load(p):
     raw=open(p,encoding='utf-8').read(); return json.loads(raw[raw.index('{'):])
 res_file, ord_file, OUT, PREPARED = sys.argv[1:5]
 PREV = json.load(open(sys.argv[5])) if len(sys.argv)>5 and sys.argv[5] not in ('','-') else None
-START = sys.argv[6] if len(sys.argv)>6 else None
+START = sys.argv[6] if len(sys.argv)>6 and sys.argv[6] not in ('','-') else None
+LOC = sys.argv[7] if len(sys.argv)>7 else 'Gig Harbor'   # tasting room: 'Gig Harbor' or 'Seattle'
 resos=load(res_file)['reservations']; orders=load(ord_file)['orders']
-resos=[r for r in resos if r.get('status') not in ('Cancelled','No Show')]
+resos=[r for r in resos if r.get('status') not in ('Cancelled','No Show') and (r.get('location') or LOC)==LOC]
 byc=defaultdict(list)
 for o in orders: byc[o['customer_id']].append(o)
 
@@ -128,12 +130,12 @@ if PREV:
         changes.append(f"Total bottles: {PREV.get('bottles')} -> {total}. Reservations: {PREV.get('reservations')} -> {nres}.")
 
 story=[Paragraph("Spruce Hill Winery",ParagraphStyle('x',parent=N,textColor=green,fontSize=10)),
- Paragraph("Fall Wine Club Pickup Weekend: Gig Harbor",H1),
- Paragraph(f"{perday[days[0]][0]} through {perday[days[-1]][0]}, 2026. Prepared {PREPARED} from Commerce7 reservations and unfulfilled Club pickup orders.",Sm),Spacer(1,6)]
+ Paragraph(f"Fall Wine Club Pickup: {LOC}",H1),
+ Paragraph((f"{perday[days[0]][0]} through {perday[days[-1]][0]}, 2026." if len(days)>1 else f"{perday[days[0]][0]}, 2026.")+f" Prepared {PREPARED} from Commerce7 reservations and unfulfilled Club pickup orders.",Sm),Spacer(1,6)]
 sd=[["Day","Resos","Guests","Bottles"]]+[[v[0],str(v[1]),str(v[2]),str(v[3])] for v in perday.values()]+[["Total",str(nres),str(ng),str(total)]]
 wd=[["Wine","Bottles","Cases"]]+[[k,str(v),f"{v/12:.2f}"] for k,v in wine.most_common()]+[["Total",str(total),f"{total/12:.2f}"]]
 left=[Paragraph("Summary",H2),tbl(sd,[1.3*inch,0.5*inch,0.55*inch,0.6*inch],(1,2,3),True),Spacer(1,6),
-      Paragraph(f"<b>Stage {total} bottles ({total/12:.2f} cases) at Gig Harbor.</b> Busiest slot: {top[0]} with {top[1]} parties.",N)]
+      Paragraph(f"<b>Stage {total} bottles ({total/12:.2f} cases) at {LOC}.</b> Busiest slot: {top[0]} with {top[1]} parties.",N)]
 right=[Paragraph("Pull List by Wine",H2),tbl(wd,[2.1*inch,0.6*inch,0.6*inch],(1,2),True)]
 grid=Table([[left,right]],colWidths=[3.2*inch,3.6*inch]); grid.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),0),('RIGHTPADDING',(0,0),(0,0),12)]))
 story+=[grid]
@@ -193,13 +195,13 @@ for dkey in days:
             Spacer(1,4),Timeline(tl[dkey])])]
 def footer(c,doc):
     c.setFont('Helvetica',7.5); c.setFillColor(colors.grey)
-    c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup Weekend, Gig Harbor | Source: Commerce7, {PREPARED}")
+    c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup, {LOC} | Source: Commerce7, {PREPARED}")
     c.drawRightString(letter[0]-0.75*inch,0.5*inch,f"Page {doc.page}")
 SimpleDocTemplate(OUT,pagesize=letter,leftMargin=0.75*inch,rightMargin=0.75*inch,topMargin=0.7*inch,bottomMargin=0.8*inch,
-    title="Fall Wine Club Pickup Weekend",author="Spruce Hill Winery").build(story,onFirstPage=footer,onLaterPages=footer)
+    title=f"Fall Wine Club Pickup: {LOC}",author="Spruce Hill Winery").build(story,onFirstPage=footer,onLaterPages=footer)
 json.dump(summary,open(OUT.replace('.pdf','')+'.summary.json','w'),indent=1)
 # Plain-text email body
-lines=[f"Fall Club Pickup Weekend, Gig Harbor. Prepared {PREPARED}.","",f"Stage {total} bottles ({total/12:.2f} cases). {nres} reservations, {ng} guests.",""]
+lines=[f"Fall Club Pickup, {LOC}. Prepared {PREPARED}.","",f"Stage {total} bottles ({total/12:.2f} cases). {nres} reservations, {ng} guests.",""]
 lines+=[f"  {v[0]}: {v[1]} resos, {v[2]} guests, {v[3]} bottles" for v in perday.values()]
 lines+=["","Pull list:"]+[f"  {k}: {v}" for k,v in wine.most_common()]
 if changes: lines+=["",f"Changes since {PREV.get('prepared')}:"]+[f"  - {c}" for c in changes]
