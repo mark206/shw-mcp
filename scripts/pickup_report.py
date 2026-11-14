@@ -70,7 +70,8 @@ for r in sorted(resos,key=lambda r:r['date']):
     elif '3 Bottle' in cs or nb<=3: tier='wanderer'
     elif '6' in cs or nb>=6: tier='explorer'
     else: tier='other'
-    tl[dkey].append({'t':dt.hour+dt.minute/60,'last':(name.split()[-1] if name else '?'),'g':r.get('guest_count') or 0,'b':nb,'tier':tier})
+    tl[dkey].append({'t':dt.hour+dt.minute/60,'last':(name.split()[-1] if name else '?'),'g':r.get('guest_count') or 0,'b':nb,'tier':tier,
+                     'table':str(r.get('table') or 'Unassigned').replace('Community Table','Community').replace('Couch Area','Couch')})
     if not is_pickup:
         rows[dkey].append([time,name,g,'--','0',Paragraph(f"<b>{r.get('experience') or 'Reservation'}</b> (not a club pickup){', '+note if note else ''}",Sm)])
         flags.append(f"{name} ({short} {time} PM): {r.get('experience')} for {g}, not a club pickup."); continue
@@ -129,6 +130,46 @@ if PREV:
     else:
         changes.append(f"Total bottles: {PREV.get('bottles')} -> {total}. Reservations: {PREV.get('reservations')} -> {nres}.")
 
+def table_key(t):
+    m=re.match(r'^(Table|T)\s*(\d+)$',t)
+    if m: return (0,int(m.group(2)),t)
+    m=re.match(r'^C(\d+)$',t)
+    if m: return (2,int(m.group(1)),t)
+    return (1,0,t)
+class TableGantt(Flowable):
+    """One row per table, a bar per reservation, so table turns and double-bookings are visible."""
+    def __init__(self,items,width=7.0*inch,dur=1.5):
+        super().__init__(); self.items=items; self.w=width; self.dur=dur
+        self.tables=sorted({i['table'] for i in items},key=table_key)
+        self.row=16; self.top=22; self.left=78; self.height=self.top+len(self.tables)*self.row+8
+        self.conflicts=[]
+    def wrap(self,aw,ah): return self.w,self.height
+    def draw(self):
+        c=self.canv; it=self.items
+        if not it: return
+        t0=int(min(i['t'] for i in it)); t1=max(i['t'] for i in it)+self.dur; t1=int(t1)+(1 if t1%1 else 0)
+        span=max(t1-t0,1); px=(self.w-self.left-10)/span; X=lambda t:self.left+(t-t0)*px; H=self.height
+        c.setFont('Helvetica',8); c.setStrokeColor(colors.HexColor('#B4B2A9')); c.setLineWidth(0.4); c.setDash(2,2)
+        for h in range(t0,t1+1):
+            x=X(h); c.line(x,H-self.top+4,x,4); c.setFillColor(colors.HexColor('#5F5E5A')); c.drawCentredString(x,H-10,f"{(h-1)%12+1} {'pm' if h>=12 else 'am'}")
+        c.setDash()
+        y=H-self.top-self.row
+        for tname in self.tables:
+            c.setFillColor(colors.HexColor('#444441')); c.setFont('Helvetica-Bold',8); c.drawRightString(self.left-6,y+4,tname)
+            c.setStrokeColor(colors.HexColor('#E5E3DB')); c.setLineWidth(0.3); c.line(self.left,y-1.5,self.w,y-1.5)
+            rows=sorted([i for i in it if i['table']==tname],key=lambda i:i['t']); prev_end=None
+            for i in rows:
+                fill,stroke,txt=TIER_COL[i['tier']]; x=X(i['t']); w=self.dur*px
+                clash=prev_end is not None and i['t']<prev_end-1e-6
+                c.setFillColor(colors.HexColor(fill)); c.setStrokeColor(colors.HexColor('#A32D2D' if clash else stroke)); c.setLineWidth(1.2 if clash else 0.5)
+                c.roundRect(x,y,w,self.row-3.5,2,fill=1,stroke=1)
+                c.setFillColor(colors.HexColor(txt)); c.setFont('Helvetica-Bold',7.5)
+                lab=f"{i['last'][:14]} ({i['g']})"
+                if c.stringWidth(lab,'Helvetica-Bold',7.5)>w-6: lab=i['last'][:int((w-6)/4.2)]
+                c.drawString(x+3,y+3.5,lab)
+                if clash: self.conflicts.append(f"{tname}: {i['last']} overlaps previous party")
+                prev_end=i['t']+self.dur
+            y-=self.row
 story=[Paragraph("Spruce Hill Winery",ParagraphStyle('x',parent=N,textColor=green,fontSize=10)),
  Paragraph(f"Fall Wine Club Pickup: {LOC}",H1),
  Paragraph((f"{perday[days[0]][0]} through {perday[days[-1]][0]}, 2026." if len(days)>1 else f"{perday[days[0]][0]}, 2026.")+f" Prepared {PREPARED} from Commerce7 reservations and unfulfilled Club pickup orders.",Sm),Spacer(1,6)]
@@ -192,7 +233,10 @@ for dkey in days:
             tbl([["Time","Member","Guests","Order","Btl","Wine"]]+rows[dkey],[0.45*inch,1.4*inch,0.5*inch,0.5*inch,0.4*inch,3.75*inch],(2,3,4)),
             KeepTogether([Paragraph("Arrival timeline",H2),
             Paragraph("Each bar starts at the reservation time and runs about 90 minutes. Stacked bars show how many parties are in the room at once.",Sm),
-            Spacer(1,4),Timeline(tl[dkey])])]
+            Spacer(1,4),Timeline(tl[dkey])]),
+            KeepTogether([Paragraph("Table timeline",H2),
+            Paragraph("One row per table. Red outline means two parties overlap at the same table within 90 minutes.",Sm),
+            Spacer(1,4),TableGantt(tl[dkey])])]
 def footer(c,doc):
     c.setFont('Helvetica',7.5); c.setFillColor(colors.grey)
     c.drawString(0.75*inch,0.5*inch,f"Spruce Hill Winery | Fall Club Pickup, {LOC} | Source: Commerce7, {PREPARED}")
