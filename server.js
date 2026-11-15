@@ -497,15 +497,26 @@ async function executeTool(name, args = {}) {
     // C7 nests the club under m.club and the person under m.customer (there is no m.clubTitle / m.firstName)
     const perClub = Math.max(1, Math.min(limit, 50));
     const byClub = {};
+    const byLocation = {};      // pickup location (or "Ship") → { count, by_club }
     for (const m of memberships) {
       const title = m.club?.title || m.clubTitle || "Unknown";
-      if (!byClub[title]) byClub[title] = { club: title, count: 0, members: [] };
+      if (!byClub[title]) byClub[title] = { club: title, count: 0, by_delivery: {}, members: [] };
       byClub[title].count++;
+      const method = m.orderDeliveryMethod || m.deliveryMethod || "Unknown";
+      const loc = method === "Pickup"
+        ? (LOCATION_NAMES[m.pickupInventoryLocationId] || m.pickupInventoryLocation?.title || m.pickupInventoryLocationId || "Pickup (unassigned)")
+        : method;
+      byClub[title].by_delivery[loc] = (byClub[title].by_delivery[loc] || 0) + 1;
+      if (!byLocation[loc]) byLocation[loc] = { location: loc, count: 0, by_club: {} };
+      byLocation[loc].count++;
+      byLocation[loc].by_club[title] = (byLocation[loc].by_club[title] || 0) + 1;
       byClub[title].members.push({
         name:        `${m.customer?.firstName || ""} ${m.customer?.lastName || ""}`.trim() || m.customerId || "",
         email:       m.customer?.emails?.[0]?.email || m.customer?.email || "",
         signup_date: pacificDay(m.signupDate || m.createdAt) || null,
         status:      m.status,
+        delivery:    loc,
+        city:        m.customer?.city || null,
         ...(m.cancelDate ? { cancel_date: pacificDay(m.cancelDate) } : {}),
       });
     }
@@ -517,6 +528,7 @@ async function executeTool(name, args = {}) {
     return {
       status_filter: status,
       total_memberships: memberships.length,
+      by_location: Object.values(byLocation).sort((a, b) => b.count - a.count),
       note: `members lists show up to ${perClub} most recent signups per club; raise limit (max 50) for more`,
       by_club: Object.values(byClub).sort((a, b) => b.count - a.count),
     };
