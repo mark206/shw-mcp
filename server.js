@@ -97,12 +97,41 @@ function inPacificRange(o, from_date, to_date) {
 }
 // Ask the API for a window one day wider on each side (its date filter is UTC
 // and date-only), then trim precisely by Pacific day client-side.
-function apiDateWindow(from_date, to_date) {
+function apiDateWindow(from_date, to_date, field = "orderPaidDate") {
   if (!from_date && !to_date) return "";
   const lo = from_date ? shiftDay(from_date, -1) : "2000-01-01";
   const hi = to_date ? shiftDay(to_date, 2) : "2100-01-01";
-  return `&orderPaidDate=btw:${lo}|${hi}`;
+  return `&${field}=btw:${lo}|${hi}`;
 }
+
+// ── Fulfillment (pickup / ship) date handling ────────────────────────────────
+// When an order was actually picked up or shipped, which can be days or months
+// after it was paid (club orders are paid at release and picked up later).
+function fulfilledAt(o) {
+  if (o.orderFulfilledDate) return o.orderFulfilledDate;
+  const ds = (o.fulfillments || []).map(f => f.fulfillmentDate).filter(Boolean).sort();
+  return ds.length ? ds[ds.length - 1] : null;
+}
+function dayInRange(d, from_date, to_date) {
+  return !!d && (!from_date || d >= from_date) && (!to_date || d <= to_date);
+}
+// Whether the C7 order list honors an orderFulfilledDate filter. Probed once with
+// a window no order can fall in: a filter that works returns nothing, a filter
+// that is ignored returns orders. A failed probe is not cached, so it is retried.
+let fulfilledFilterOk = null;
+async function apiFiltersByFulfilledDate() {
+  if (fulfilledFilterOk !== null) return fulfilledFilterOk;
+  try {
+    const d = await c7Get(`/order?paymentStatus=Paid&orderFulfilledDate=btw:1990-01-01|1990-01-02&limit=1`);
+    fulfilledFilterOk = (d.orders || []).length === 0;
+    return fulfilledFilterOk;
+  } catch {
+    return false;
+  }
+}
+// Without that API filter, orders fulfilled in a window are found by scanning
+// orders paid up to this many days before it (override with from_date).
+const FULFILLED_LOOKBACK_DAYS = 45;
 // ── Product -> department lookup (departments are how C7 groups products for accounting) ──
 let deptCache = { at: 0, bySku: {}, byProductId: {} };
 async function getDeptMaps() {
@@ -178,10 +207,12 @@ const TOOLS = [
   },
   {
     name: "get_orders",
-    description: "Get orders with full detail. Date filters use Pacific-time calendar days (matches C7 reports). Filter by date, channel, customer name/ID, or fulfillment status (e.g. unfulfilled club pickups).",
+    description: "Get orders with full detail. Date filters use Pacific-time calendar days (matches C7 reports). Filter by paid date, fulfilled date (when the order was picked up or shipped), channel, customer name/ID, or fulfillment status (e.g. unfulfilled club pickups). Each order shows its fulfilled date and each item the inventory location it came from.",
     inputSchema: { type: "object", properties: {
-      from_date:     { type: "string", description: "Start date YYYY-MM-DD (optional)" },
-      to_date:       { type: "string", description: "End date YYYY-MM-DD (optional)" },
+      from_date:     { type: "string", description: "Paid-date start YYYY-MM-DD (optional)" },
+      to_date:       { type: "string", description: "Paid-date end YYYY-MM-DD (optional)" },
+      fulfilled_from: { type: "string", description: "Fulfilled-date start YYYY-MM-DD (optional). Use with fulfilled_to to find orders picked up or shipped in a window regardless of when they were paid, e.g. club pickups over a weekend." },
+      fulfilled_to:   { type: "string", description: "Fulfilled-date end YYYY-MM-DD (optional)" },
       channel:       { type: "string", enum: ["all","Web","POS","Club"], default: "all" },
       customer_name: { type: "string", description: "Filter by customer name (partial match)" },
       customer_id:   { type: "string", description: "Filter by Commerce7 customer ID (exact)" },
@@ -438,16 +469,28 @@ async function executeTool(name, args = {}) {
 
   // ── get_orders ─────────────────────────────────────────────────────────────
   if (name === "get_orders") {
-    const { from_date, to_date, channel = "all", customer_name, customer_id, fulfillment_status = "all", limit = 20 } = args;
-    let path = `/order?paymentStatus=Paid${apiDateWindow(from_date, to_date)}`;
+    const { from_date, to_date, fulfilled_from, fulfilled_to, channel = "all", customer_name, customer_id, fulfillment_status = "all", limit = 20 } = args;
+    const byFulfilled = !!(fulfilled_from || fulfilled_to);
+    let path = `/order?paymentStatus=Paid`;
+    let note;
+    if (byFulfilled && await apiFiltersByFulfilledDate()) {
+      path += apiDateWindow(fulfilled_from, fulfilled_to, "orderFulfilledDate") + apiDateWindow(from_date, to_date);
+    } else if (byFulfilled) {
+      const paidFrom = from_date || shiftDay(fulfilled_from || fulfilled_to, -FULFILLED_LOOKBACK_DAYS);
+      path += apiDateWindow(paidFrom, to_date);
+      if (!from_date) note = `Only orders paid on or after ${paidFrom} were searched. Pass from_date to look further back (e.g. club orders paid months before pickup).`;
+    } else {
+      path += apiDateWindow(from_date, to_date);
+    }
     if (channel !== "all") path += `&channel=${channel}`;
     if (customer_id) path += `&customerId=${encodeURIComponent(customer_id)}`;
     if (fulfillment_status !== "all") path += `&fulfillmentStatus=${encodeURIComponent(fulfillment_status)}`;
     const cap = Math.min(limit, 200);
     let orders;
-    if (from_date || to_date || customer_id || fulfillment_status !== "all") {
+    if (from_date || to_date || byFulfilled || customer_id || fulfillment_status !== "all") {
       // Fetch the whole (widened) window, then trim by Pacific day
       orders = (await paginate(path, "orders")).filter(o => inPacificRange(o, from_date, to_date));
+      if (byFulfilled) orders = orders.filter(o => dayInRange(pacificDay(fulfilledAt(o)), fulfilled_from, fulfilled_to));
     } else {
       const d = await c7Get(`${path}&limit=${cap}`);
       orders = d.orders || [];
@@ -460,13 +503,15 @@ async function executeTool(name, args = {}) {
         return fn.includes(q) || ln.includes(q) || `${fn} ${ln}`.includes(q);
       });
     }
-    orders.sort((a, b) => (b.orderPaidDate || "").localeCompare(a.orderPaidDate || ""));
+    const sortKey = byFulfilled ? (o => fulfilledAt(o) || "") : (o => o.orderPaidDate || "");
+    orders.sort((a, b) => sortKey(b).localeCompare(sortKey(a)));
     const matched = orders.length;
     orders = orders.slice(0, cap);
     return {
       total_matching: matched,
       returned: orders.length,
       truncated: matched > orders.length,
+      note,
       orders: orders.map(o => ({
         order_number:  o.orderNumber,
         date:          o.orderPaidDate,
@@ -480,8 +525,10 @@ async function executeTool(name, args = {}) {
         tip:           dollars(o.tipTotal || 0),
         total_after_tip: dollars(o.totalAfterTip ?? o.total),
         item_count:    o.items?.length || 0,
-        items:         (o.items || []).map(i => ({ title: i.productTitle, sku: i.sku, type: i.type, qty: i.quantity, price: dollars(i.price), original_price: dollars(i.originalPrice ?? i.price) })),
+        items:         (o.items || []).map(i => ({ title: i.productTitle, sku: i.sku, type: i.type, qty: i.quantity, qty_fulfilled: i.quantityFulfilled, location: LOCATION_NAMES[i.inventoryLocationId] || i.inventoryLocationId || undefined, price: dollars(i.price), original_price: dollars(i.originalPrice ?? i.price) })),
         fulfillment:   o.fulfillmentStatus,
+        fulfilled_date: fulfilledAt(o) || undefined,
+        fulfilled_date_pacific: pacificDay(fulfilledAt(o)) || undefined,
         delivery_method: o.orderDeliveryMethod,
         customer_id:   o.customerId,
         customer_type: o.customerType,
