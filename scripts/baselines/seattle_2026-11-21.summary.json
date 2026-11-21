@@ -1,0 +1,51 @@
+{
+ "prepared": "Sat Nov 21, 2026",
+ "reservations": 8,
+ "guests": 15,
+ "bottles": 33,
+ "by_wine": {
+  "2023 Rainforest Red": 10,
+  "2024 Mourv\u00e8dre": 7,
+  "2025 Roussanne": 7,
+  "2024 Tannat": 1,
+  "2023 Cabernet Sauvignon": 2,
+  "2023 Merlot": 1,
+  "2024 Trillium": 2,
+  "2025 Grenache Blanc": 2,
+  "2023 Tempranillo": 1
+ },
+ "per_member": {
+  "Allison Curd": 3,
+  "Christi Webster": 3,
+  "Elizabeth Hui": 3,
+  "Misty Shock Rule": 3,
+  "Robert Young": 12,
+  "Maura Cannon": 3,
+  "Lori Dinnison": 3,
+  "Kecia Reichstein": 3
+ },
+ "others": 59,
+ "other_bottles": 289,
+ "members": [
+  "Allison Curd",
+  "Christi Webster",
+  "Elizabeth Hui",
+  "Kecia Reichstein",
+  "Lori Dinnison",
+  "Maura Cannon",
+  "Misty Shock Rule",
+  "Robert Young"
+ ],
+ "day_members": {
+  "2026-11-22": [
+   "Allison Curd",
+   "Christi Webster",
+   "Elizabeth Hui",
+   "Misty Shock Rule",
+   "Robert Young",
+   "Maura Cannon",
+   "Lori Dinnison",
+   "Kecia Reichstein"
+  ]
+ }
+}
