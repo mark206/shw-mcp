@@ -151,6 +151,33 @@ function isWineItem(item) {
   return /^20\d\d_/.test(item.sku || "");
 }
 
+// ── Customer notes ───────────────────────────────────────────────────────────
+// Notes are their own records in C7 (GET /note), linked to a customer by customerId.
+function noteWhen(n) { return n.noteDate || n.createdAt || null; }
+// 'allergy "seattle pickup"' -> ["allergy", "seattle pickup"]; all terms must appear.
+function parseSearch(s) {
+  if (!s) return [];
+  const terms = [];
+  String(s).toLowerCase().replace(/"([^"]+)"|(\S+)/g, (_, phrase, word) => { terms.push((phrase || word).trim()); return ""; });
+  return terms.filter(Boolean);
+}
+// The full note list is re-read at most every 5 minutes, so repeated searches are quick.
+let notesCache = { at: 0, notes: null };
+async function getAllNotes() {
+  if (notesCache.notes && Date.now() - notesCache.at < 5 * 60 * 1000) return notesCache.notes;
+  const notes = await paginate("/note", "notes");
+  notesCache = { at: Date.now(), notes };
+  return notes;
+}
+const customerCache = new Map();
+async function getCustomerById(id) {
+  if (customerCache.has(id)) return customerCache.get(id);
+  let c = null;
+  try { c = await c7Get(`/customer/${encodeURIComponent(id)}`); } catch { c = null; }
+  customerCache.set(id, c);
+  return c;
+}
+
 // ── Tool definitions ──────────────────────────────────────────────────────────
 const TOOLS = [
   {
@@ -237,6 +264,19 @@ const TOOLS = [
       search: { type: "string", description: "Name or email to search for" },
       limit:  { type: "number", default: 10 },
     }, required: ["search"] },
+    annotations: { readOnlyHint: true, destructiveHint: false },
+  },
+  {
+    name: "get_notes",
+    description: "Search the notes staff have added to customers in Commerce7 (read-only). Find every note mentioning something (e.g. 'allergy', 'Seattle pickup'), read all notes for one customer, or list recent notes. Returns note text, note date (Pacific), and the customer's name, email and club status.",
+    inputSchema: { type: "object", properties: {
+      search:        { type: "string", description: "Text to find in note content, case-insensitive. Several words must all appear, in any order; put a phrase in double quotes to match it exactly." },
+      customer_name: { type: "string", description: "Only notes for customers matching this name or email" },
+      customer_id:   { type: "string", description: "Only notes for this Commerce7 customer ID (exact)" },
+      from_date:     { type: "string", description: "Note-date start YYYY-MM-DD, Pacific (optional)" },
+      to_date:       { type: "string", description: "Note-date end YYYY-MM-DD, Pacific (optional)" },
+      limit:         { type: "number", default: 50, description: "Max notes to return, newest first (default 50, max 200)" },
+    }},
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
   {
@@ -600,6 +640,65 @@ async function executeTool(name, args = {}) {
         last_order:     c.orderInformation?.lastOrderDate || null,
         is_club_member: c.orderInformation?.isActiveClubMember || false,
       }))
+    };
+  }
+
+  // ── get_notes ──────────────────────────────────────────────────────────────
+  if (name === "get_notes") {
+    const { search, customer_name, customer_id, from_date, to_date, limit = 50 } = args;
+    const cap = Math.max(1, Math.min(limit, 200));
+
+    // Which customers to look at: one ID, everyone matching a name, or all.
+    let customerIds = null;
+    if (customer_id) customerIds = [customer_id];
+    else if (customer_name) {
+      const d = await c7Get(`/customer?q=${encodeURIComponent(customer_name)}&limit=50`);
+      customerIds = (d.customers || []).map(c => c.id);
+      if (!customerIds.length) return { total_matching: 0, returned: 0, truncated: false, note: `No customer matches "${customer_name}".`, notes: [] };
+    }
+    let notes = [];
+    if (customerIds) {
+      for (const id of customerIds) notes = notes.concat(await paginate(`/note?customerId=${encodeURIComponent(id)}`, "notes"));
+    } else {
+      notes = await getAllNotes();
+    }
+
+    // Text match is done here, not by the API, so it is predictable: every term must appear.
+    const terms = parseSearch(search);
+    notes = notes.filter(n => {
+      const text = (n.content || "").toLowerCase();
+      if (!terms.every(t => text.includes(t))) return false;
+      if (!from_date && !to_date) return true;
+      return dayInRange(pacificDay(noteWhen(n)), from_date, to_date);
+    });
+    notes.sort((a, b) => (noteWhen(b) || "").localeCompare(noteWhen(a) || ""));
+    const matched = notes.length;
+    notes = notes.slice(0, cap);
+
+    // Name each note's customer (embedded on the note if C7 sends it, else looked up once per customer).
+    const people = {};
+    for (const id of [...new Set(notes.map(n => n.customerId).filter(Boolean))]) {
+      const embedded = notes.find(n => n.customerId === id && n.customer)?.customer;
+      people[id] = embedded || await getCustomerById(id);
+    }
+    return {
+      total_matching: matched,
+      returned: notes.length,
+      truncated: matched > notes.length,
+      notes: notes.map(n => {
+        const c = people[n.customerId] || {};
+        return {
+          note_date_pacific: pacificDay(noteWhen(n)),
+          content:        n.content || "",
+          type:           n.type,
+          customer:       `${c.firstName || ""} ${c.lastName || ""}`.trim() || undefined,
+          customer_email: c.emails?.[0]?.email || undefined,
+          club_status:    c.orderInformation?.currentClubTitle || undefined,
+          customer_id:    n.customerId,
+          order_id:       n.orderId || undefined,
+          note_id:        n.id,
+        };
+      }),
     };
   }
 
