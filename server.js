@@ -272,10 +272,11 @@ const TOOLS = [
   },
   {
     name: "get_club_members",
-    description: "Get wine club membership data. Returns active members by club tier, total counts, and recent signups.",
+    description: "Get wine club membership data. Returns members by club tier with signup date, status and cancel date, plus counts by club and pickup location. Use tag to see only memberships of customers with a tag (e.g. 'Founder's Club'), including their past cancelled memberships with status all.",
     inputSchema: { type: "object", properties: {
       status: { type: "string", enum: ["Active","Cancelled","Paused","all"], default: "Active" },
-      limit:  { type: "number", default: 50 },
+      tag:    { type: "string", description: "Only memberships of customers with a tag or group whose name contains this, case-insensitive" },
+      limit:  { type: "number", default: 50, description: "Max members listed per club, most recent signups first (default 50, max 500)" },
     }},
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
@@ -605,10 +606,17 @@ async function executeTool(name, args = {}) {
 
   // ── get_club_members ───────────────────────────────────────────────────────
   if (name === "get_club_members") {
-    const { status = "Active", limit = 50 } = args;
-    const memberships = await paginate(status === "all" ? "/club-membership" : `/club-membership?status=${status}`, "clubMemberships");
+    const { status = "Active", tag, limit = 50 } = args;
+    let memberships = await paginate(status === "all" ? "/club-membership" : `/club-membership?status=${status}`, "clubMemberships");
+    if (tag) {
+      const tq = tag.toLowerCase();
+      const ids = new Set((await getAllCustomers())
+        .filter(c => [...(c.tags || []), ...(c.groups || [])].some(t => (t?.title || "").toLowerCase().includes(tq)))
+        .map(c => c.id));
+      memberships = memberships.filter(m => ids.has(m.customerId || m.customer?.id));
+    }
     // C7 nests the club under m.club and the person under m.customer (there is no m.clubTitle / m.firstName)
-    const perClub = Math.max(1, Math.min(limit, 50));
+    const perClub = Math.max(1, Math.min(limit, 500));
     const byClub = {};
     const byLocation = {};      // pickup location (or "Ship") → { count, by_club }
     for (const m of memberships) {
@@ -626,6 +634,7 @@ async function executeTool(name, args = {}) {
       byClub[title].members.push({
         name:        `${m.customer?.firstName || ""} ${m.customer?.lastName || ""}`.trim() || m.customerId || "",
         email:       m.customer?.emails?.[0]?.email || m.customer?.email || "",
+        customer_id: m.customerId || m.customer?.id || undefined,
         signup_date: pacificDay(m.signupDate || m.createdAt) || null,
         status:      m.status,
         delivery:    loc,
@@ -640,9 +649,10 @@ async function executeTool(name, args = {}) {
     }
     return {
       status_filter: status,
+      tag_filter: tag || undefined,
       total_memberships: memberships.length,
       by_location: Object.values(byLocation).sort((a, b) => b.count - a.count),
-      note: `members lists show up to ${perClub} most recent signups per club; raise limit (max 50) for more`,
+      note: `members lists show up to ${perClub} most recent signups per club; raise limit (max 500) for more`,
       by_club: Object.values(byClub).sort((a, b) => b.count - a.count),
     };
   }
