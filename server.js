@@ -1,4 +1,5 @@
 import http from 'http';
+import crypto from 'crypto';
 
 // ── Credentials ───────────────────────────────────────────────────────────────
 const TENANT     = process.env.C7_TENANT     || "spruce-hill-winery";
@@ -780,6 +781,25 @@ async function executeTool(name, args = {}) {
   throw new Error(`Unknown tool: ${name}`);
 }
 
+// ── Access key ─────────────────────────────────────────────────────────────────
+// Set MCP_ACCESS_KEY in Railway to lock the server. Tool calls must then carry
+// the key, either as the last part of the URL path (https://host/mcp/<key>, how
+// the Claude connector sends it) or as "Authorization: Bearer <key>".
+// Without MCP_ACCESS_KEY the server stays open, so a deploy never locks you out
+// before the key is set; a warning is logged at startup.
+const ACCESS_KEY = process.env.MCP_ACCESS_KEY || "";
+const sha = v => crypto.createHash("sha256").update(String(v)).digest();
+function keyMatches(given) {
+  return !!given && crypto.timingSafeEqual(sha(given), sha(ACCESS_KEY));
+}
+function hasAccess(req) {
+  if (!ACCESS_KEY) return true;
+  const path = (req.url || "/").split("?")[0];
+  const last = decodeURIComponent(path.split("/").filter(Boolean).pop() || "");
+  const bearer = (req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  return keyMatches(last) || keyMatches(bearer);
+}
+
 // ── JSON-RPC helpers ───────────────────────────────────────────────────────────
 const jrpc      = (id, result)        => JSON.stringify({ jsonrpc: "2.0", id, result });
 const jrpcError = (id, code, message) => JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } });
@@ -823,6 +843,12 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(405); res.end(JSON.stringify({ error: "Method not allowed" })); return;
   }
 
+  // Every tool call needs the access key once MCP_ACCESS_KEY is set.
+  // 403, not 401, so Claude reports the error instead of starting a sign-in flow.
+  if (!hasAccess(req)) {
+    res.writeHead(403); res.end(jrpcError(null, -32001, "Forbidden: missing or wrong access key")); return;
+  }
+
   // Read body
   let body;
   try {
@@ -863,4 +889,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, () => console.log(`SHW MCP server running on port ${PORT}`));
+server.listen(PORT, () => {
+  console.log(`SHW MCP server running on port ${PORT}`);
+  if (!ACCESS_KEY) console.warn("WARNING: MCP_ACCESS_KEY is not set; anyone with the URL can call every tool.");
+});
