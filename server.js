@@ -152,6 +152,27 @@ function isWineItem(item) {
   return /^20\d\d_/.test(item.sku || "");
 }
 
+// ── Customer tags, groups and custom fields ──────────────────────────────────
+// Custom fields live in customer.metaData; tags and groups are arrays of {title}.
+// The API can't filter on any of them, so filters read every customer (cached 10 min).
+function customFields(c) {
+  const out = {};
+  for (const [k, v] of Object.entries(c.metaData || {})) {
+    if (v === null || v === undefined || v === "" || (Array.isArray(v) && !v.length)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+function fieldText(v) { return Array.isArray(v) ? v.join(", ") : typeof v === "object" ? JSON.stringify(v) : String(v); }
+function normKey(k) { return String(k).toLowerCase().replace(/[^a-z0-9]/g, ""); }
+let customersCache = { at: 0, customers: null };
+async function getAllCustomers() {
+  if (customersCache.customers && Date.now() - customersCache.at < 10 * 60 * 1000) return customersCache.customers;
+  const customers = await paginate("/customer", "customers");
+  customersCache = { at: Date.now(), customers };
+  return customers;
+}
+
 // ── Customer notes ───────────────────────────────────────────────────────────
 // Notes are their own records in C7 (GET /note), linked to a customer by customerId.
 function noteWhen(n) { return n.noteDate || n.createdAt || null; }
@@ -260,11 +281,15 @@ const TOOLS = [
   },
   {
     name: "get_customers",
-    description: "Look up customers by name or email. Returns contact info, club status, lifetime value, and order history.",
+    description: "Look up customers by name or email, or find every customer with a given tag, group or custom field (e.g. tag 'Founders Club', custom field 'Import Source'). Returns contact info, club status, lifetime value, order history, tags, groups and custom fields. Use list_fields=true to see which tags, groups and custom fields exist.",
     inputSchema: { type: "object", properties: {
-      search: { type: "string", description: "Name or email to search for" },
-      limit:  { type: "number", default: 10 },
-    }, required: ["search"] },
+      search:       { type: "string", description: "Name or email to search for (optional when filtering by tag or custom field)" },
+      tag:          { type: "string", description: "Only customers with a tag or group whose name contains this, case-insensitive (e.g. 'Founders')" },
+      custom_field: { type: "string", description: "Only customers with this custom field filled in. Matches the field name loosely: 'Import Source', 'import-source' and 'importSource' are the same." },
+      custom_value: { type: "string", description: "With custom_field: only customers whose value contains this, case-insensitive" },
+      list_fields:  { type: "boolean", default: false, description: "Instead of customers, return every tag, group and custom field in use, with how many customers have each" },
+      limit:        { type: "number", default: 10, description: "Max customers to return (default 10, max 200)" },
+    }},
     annotations: { readOnlyHint: true, destructiveHint: false },
   },
   {
@@ -624,12 +649,58 @@ async function executeTool(name, args = {}) {
 
   // ── get_customers ──────────────────────────────────────────────────────────
   if (name === "get_customers") {
-    const { search, limit = 10 } = args;
-    const d = await c7Get(`/customer?q=${encodeURIComponent(search)}&limit=${Math.min(limit, 50)}`);
-    const customers = d.customers || [];
+    const { search, tag, custom_field, custom_value, list_fields = false, limit = 10 } = args;
+    const cap = Math.max(1, Math.min(limit, 200));
+
+    // Which tags, groups and custom fields exist, across every customer.
+    if (list_fields) {
+      const all = await getAllCustomers();
+      const tags = {}, groups = {}, fields = {};
+      for (const c of all) {
+        for (const t of c.tags || [])   if (t?.title) tags[t.title]   = (tags[t.title]   || 0) + 1;
+        for (const g of c.groups || []) if (g?.title) groups[g.title] = (groups[g.title] || 0) + 1;
+        for (const [k, v] of Object.entries(customFields(c))) {
+          const f = fields[k] || (fields[k] = { customers: 0, example_values: [] });
+          f.customers++;
+          const sv = fieldText(v);
+          if (f.example_values.length < 5 && !f.example_values.includes(sv)) f.example_values.push(sv);
+        }
+      }
+      const byCount = o => Object.fromEntries(Object.entries(o).sort((a, b) => b[1] - a[1]));
+      return { customers_scanned: all.length, tags: byCount(tags), groups: byCount(groups), custom_fields: fields };
+    }
+
+    if (!search && !tag && !custom_field) throw new Error("Give search, tag or custom_field (or list_fields=true).");
+    const filtering = !!(tag || custom_field);
+    let customers, total;
+    if (search && !filtering) {
+      const d = await c7Get(`/customer?q=${encodeURIComponent(search)}&limit=${Math.min(cap, 50)}`);
+      customers = d.customers || []; total = d.total;
+    } else {
+      // Tags and custom fields can't be filtered by the API, so filter every customer here.
+      customers = search
+        ? await paginate(`/customer?q=${encodeURIComponent(search)}`, "customers")
+        : await getAllCustomers();
+      const tq = (tag || "").toLowerCase();
+      const fk = normKey(custom_field || "");
+      const fv = (custom_value || "").toLowerCase();
+      customers = customers.filter(c => {
+        if (tag && ![...(c.tags || []), ...(c.groups || [])].some(t => (t?.title || "").toLowerCase().includes(tq))) return false;
+        if (custom_field) {
+          const hit = Object.entries(customFields(c)).find(([k]) => normKey(k) === fk || normKey(k).includes(fk));
+          if (!hit) return false;
+          if (custom_value && !fieldText(hit[1]).toLowerCase().includes(fv)) return false;
+        }
+        return true;
+      });
+      total = customers.length;
+    }
+    const shown = customers.slice(0, cap);
     return {
-      total_found: d.total,
-      customers: customers.map(c => ({
+      total_found: total,
+      returned: shown.length,
+      truncated: (total || 0) > shown.length,
+      customers: shown.map(c => ({
         id:             c.id,
         name:           `${c.firstName || ""} ${c.lastName || ""}`.trim(),
         email:          c.emails?.[0]?.email || "",
@@ -640,6 +711,10 @@ async function executeTool(name, args = {}) {
         order_count:    c.orderInformation?.orderCount || 0,
         last_order:     c.orderInformation?.lastOrderDate || null,
         is_club_member: c.orderInformation?.isActiveClubMember || false,
+        acquisition_channel: c.orderInformation?.acquisitionChannel || undefined,
+        tags:           (c.tags || []).map(t => t?.title).filter(Boolean),
+        groups:         (c.groups || []).map(g => g?.title).filter(Boolean),
+        custom_fields:  customFields(c),
       }))
     };
   }
